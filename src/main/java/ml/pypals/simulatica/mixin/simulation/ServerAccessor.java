@@ -10,8 +10,8 @@ import java.util.concurrent.Executor;
 @Mixin(MinecraftServer.class)
 public interface ServerAccessor {
     @Accessor("executor")
-    Executor mcr$getExecutor();
+    Executor sim$getExecutor();
     @Accessor("storageSource")
-    LevelStorageSource.LevelStorageAccess mcr$getStorageSource();
+    LevelStorageSource.LevelStorageAccess sim$getStorageSource();
 
 }

@@ -1,12 +1,20 @@
 package ml.pypals.simulatica.simulation;
 
+import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.LitematicaSchematic;
+import fi.dy.masa.malilib.util.nbt.NbtUtils;
+import fi.dy.masa.malilib.util.nbt.NbtView;
 import ml.pypals.simulatica.Simulatica;
 import ml.pypals.simulatica.mixin.LitematicaSchematicMixin;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.ProblemReporter;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
@@ -14,11 +22,12 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityTicker;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
-import net.minecraft.world.ticks.LevelTicks;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.ticks.ScheduledTick;
 import net.minecraft.world.ticks.TickPriority;
+import org.jetbrains.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.util.*;
 
 /**
@@ -52,8 +61,8 @@ public class SchematicSimulation {
     private final SimulatedServerLevel level;
 
     // Tick queues — owned here, exposed to the level via getBlockTicks()/getFluidTicks()
-    final LevelTicks<Block> blockTicks;
-    final LevelTicks<Fluid> fluidTicks;
+    final SimulatedLevelTicks<Block> blockTicks;
+    final SimulatedLevelTicks<Fluid> fluidTicks;
 
     // Block-event queue populated by SimulatedServerLevel.addBlockEvent(...)
     private final List<BlockEventData> pendingBlockEvents = new ArrayList<>();
@@ -61,6 +70,9 @@ public class SchematicSimulation {
     // Live block-entity cache: container-local BlockPos → BlockEntity instance.
     // Source of truth is the schematic's tileEntityMap; this cache is a live view.
     private final Map<BlockPos, BlockEntity> blockEntityCache = new HashMap<>();
+
+    // Live entities cache
+    private final List<Entity> entities = new ArrayList<>();
 
     private long gameTime = 0;
     private boolean running = false;
@@ -78,12 +90,24 @@ public class SchematicSimulation {
         // Build the fake level first (phase 1 — no simulation bound yet)
         this.level = SimulatedServerLevel.create(regionName, server);
 
-        // Allocate tick queues (the level needs them in init())
-        this.blockTicks = this.level.getBlockTicks(); // will become sim's after init
-        this.fluidTicks = this.level.getFluidTicks();
-
         // Phase 2 — bind simulation → level → tick queues
         this.level.init(this);
+
+        // Fetch tick queues after init() populates them
+        this.blockTicks = (SimulatedLevelTicks<Block>) this.level.getBlockTicks();
+        this.fluidTicks = (SimulatedLevelTicks<Fluid>) this.level.getFluidTicks();
+    }
+
+    public SchematicSimulation(LitematicaSchematic schematic, String regionName, SimulatedServerLevel server) {
+        this.schematic  = schematic;
+        this.accessor   = (LitematicaSchematicMixin) schematic;
+        this.regionName = regionName;
+        this.regionView = new SchematicRegionView(accessor, regionName);
+        this.level = server;
+        this.level.init(this);
+
+        this.blockTicks = (SimulatedLevelTicks<Block>) this.level.getBlockTicks();
+        this.fluidTicks = (SimulatedLevelTicks<Fluid>) this.level.getFluidTicks();
     }
 
     // =========================================================================
@@ -98,6 +122,7 @@ public class SchematicSimulation {
 
         loadSavedTicks();
         loadBlockEntityCache();
+        loadEntities();
         running = true;
     }
 
@@ -105,7 +130,9 @@ public class SchematicSimulation {
         if (!running) return;
         Simulatica.LOGGER.info("[Simulatica] Stopping simulation for region '{}'", regionName);
         saveBlockEntityCache();
+        saveEntities();
         blockEntityCache.clear();
+        entities.clear();
         running = false;
     }
 
@@ -116,7 +143,12 @@ public class SchematicSimulation {
     // =========================================================================
 
     public void tick() {
-        if (!running) return;
+        if (!running ||
+                (Minecraft.getInstance().level != null
+                        && Minecraft.getInstance().level.tickRateManager().isFrozen()
+                        && !Minecraft.getInstance().level.tickRateManager().isSteppingForward()
+                )
+        ) return;
         gameTime++;
 
         // 1. Block ticks
@@ -128,7 +160,10 @@ public class SchematicSimulation {
         // 3. Block events (pistons, etc.)
         runBlockEvents();
 
-        // 4. Block-entity tickers
+        // 4. Entities
+        tickEntities();
+
+        // 5. Block-entity tickers
         tickBlockEntities();
     }
 
@@ -136,37 +171,18 @@ public class SchematicSimulation {
     // Block / fluid tick consumers
     // =========================================================================
 
-    private void tickBlock(ScheduledTick<Block> tick) {
-        BlockPos pos = tick.pos();
+    private void tickBlock(BlockPos pos, Block block) {
         BlockState state = regionView.getBlockState(pos);
-        if (state.is(tick.type())) {
-            try {
-                state.tick(level, pos, level.getRandom());
-            } catch (Exception e) {
-                Simulatica.LOGGER.error("[Simulatica] Exception during block tick at {} ({}): {}",
-                        pos, state.getBlock(), e.getMessage(), e);
-            }
-        }
+        state.tick(level, pos, level.getRandom());
     }
 
-    private void tickFluid(ScheduledTick<Fluid> tick) {
-        BlockPos pos = tick.pos();
-        net.minecraft.world.level.material.FluidState fluidState = regionView.getBlockState(pos).getFluidState();
-        if (fluidState.is(tick.type())) {
-            try {
-                fluidState.tick(level, pos);
-            } catch (Exception e) {
-                Simulatica.LOGGER.error("[Simulatica] Exception during fluid tick at {} ({}): {}",
-                        pos, tick.type(), e.getMessage(), e);
-            }
-        }
+    private void tickFluid(BlockPos pos, Fluid block) {
+        BlockState blockState = regionView.getBlockState(pos);
+        FluidState fluidState = blockState.getFluidState();
+        fluidState.tick(level, pos, blockState);
+
     }
 
-    // =========================================================================
-    // Block events
-    // =========================================================================
-
-    /** Called by {@link SimulatedServerLevel#addBlockEvent}. */
     public void enqueueBlockEvent(BlockEventData event) {
         pendingBlockEvents.add(event);
     }
@@ -189,6 +205,38 @@ public class SchematicSimulation {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // Entity ticking
+    // =========================================================================
+
+    private void tickEntities() {
+        for (int i = 0; i < entities.size(); i++) {
+            Entity entity = entities.get(i);
+            if(!regionView.isInRegion(entity.blockPosition())){
+                entity.discard();
+            }
+            if (entity.isRemoved()) {
+                entities.remove(i--);
+                continue;
+            }
+            entity.tick();
+        }
+        // Save live entity state back to schematic NBT so Litematica renderer sees the updates
+        saveEntities();
+    }
+
+    public boolean addFreshEntity(Entity entity) {
+        if (!entities.contains(entity)) {
+            entities.add(entity);
+            return true;
+        }
+        return false;
+    }
+
+    public List<Entity> getEntities() {
+        return entities;
     }
 
     // =========================================================================
@@ -251,8 +299,7 @@ public class SchematicSimulation {
         if (be == null) return null;
 
         be.setLevel(level);
-        // 1.21.11: loadWithComponents(HolderLookup.Provider, CompoundTag)
-        be.loadWithComponents(level.registryAccess(), nbt);
+        be.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING,level.registryAccess(),nbt));
         blockEntityCache.put(pos.immutable(), be);
         return be;
     }
@@ -272,7 +319,7 @@ public class SchematicSimulation {
     public void removeBlockEntity(BlockPos pos) {
         BlockEntity old = blockEntityCache.remove(pos);
         if (old != null) old.setRemoved();
-        regionView.removeTileEntityNbt(pos);
+        regionView.removeTileEntityNbt(pos, this);
     }
 
     /**
@@ -295,7 +342,7 @@ public class SchematicSimulation {
     private void persistBlockEntity(BlockEntity be) {
         try {
             CompoundTag nbt = be.saveWithFullMetadata(level.registryAccess());
-            regionView.setTileEntityNbt(be.getBlockPos(), nbt);
+            regionView.setTileEntityNbt(be.getBlockPos(), nbt, this);
         } catch (Exception e) {
             Simulatica.LOGGER.error("[Simulatica] Failed to persist BE at {}: {}",
                     be.getBlockPos(), e.getMessage(), e);
@@ -342,14 +389,13 @@ public class SchematicSimulation {
             if (be == null) continue;
             be.setLevel(level);
             // 1.21.11: loadWithComponents(HolderLookup.Provider, CompoundTag)
-            be.loadWithComponents(registries, entry.getValue());
+            be.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING,registries,entry.getValue()));
             blockEntityCache.put(pos.immutable(), be);
         }
         Simulatica.LOGGER.info("[Simulatica] Loaded {} block entities for region '{}'",
                 blockEntityCache.size(), regionName);
     }
 
-    /** Serialises all live block entities back to the schematic before stopping. */
     private void saveBlockEntityCache() {
         for (BlockEntity be : blockEntityCache.values()) {
             if (!be.isRemoved()) {
@@ -358,9 +404,41 @@ public class SchematicSimulation {
         }
     }
 
-    // =========================================================================
-    // Getters
-    // =========================================================================
+    private void loadEntities() {
+        List<fi.dy.masa.litematica.schematic.LitematicaSchematic.EntityInfo> infoList =
+                accessor.sim$getEntities().get(regionName);
+        if (infoList != null) {
+            for (fi.dy.masa.litematica.schematic.LitematicaSchematic.EntityInfo info : infoList) {
+                Entity entity = net.minecraft.world.entity.EntityType.loadEntityRecursive(info.nbt, level, EntitySpawnReason.LOAD, e -> e);
+                if (entity != null) {
+                    entity.setPos(info.posVec.x, info.posVec.y, info.posVec.z);
+                    entities.add(entity);
+                }
+            }
+        }
+    }
+
+    private void saveEntities() {
+        List<LitematicaSchematic.EntityInfo> infoList = new ArrayList<>();
+        NbtView view = NbtView.getWriter(level.registryAccess());
+        for (Entity entity : entities) {
+            if (!entity.isRemoved()) {
+                if (view.getWriter() != null) {
+                    entity.saveWithoutId(view.getWriter());
+                    CompoundTag newTag = view.readNbt();
+                    if (newTag != null) {
+                        Identifier id = net.minecraft.world.entity.EntityType.getKey(entity.getType());
+                        newTag.putString("id", id.toString());
+                        net.minecraft.world.phys.Vec3 posVec = new net.minecraft.world.phys.Vec3(entity.getX(), entity.getY(), entity.getZ());
+                        NbtUtils.putVec3dCodec(newTag, posVec, "Pos");
+                        infoList.add(new LitematicaSchematic.EntityInfo(posVec, newTag));
+                    }
+                }
+            }
+        }
+        accessor.sim$getEntities().put(regionName, infoList);
+        DataManager.getSchematicPlacementManager().markAllPlacementsOfSchematicForRebuild(schematic);
+    }
 
     public long getGameTime()            { return gameTime; }
     public SchematicRegionView getRegionView() { return regionView; }

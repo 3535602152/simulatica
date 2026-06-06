@@ -3,11 +3,10 @@
   "package": "ml.pypals.simulatica.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "InputHandlerMixin",
     "LitematicaSchematicMixin",
-    "simulation.BlockEntityAccessor",
-    "simulation.LevelAccessor",
-    "simulation.ServerAccessor",
-    "simulation.ServerLevelAccessor"
+    "ToolModeMixin",
+    "simulation.ServerAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
@@ -16,6 +15,5 @@
     "requireAnnotations": true
   },
   "client": [
-    "simulation.ClientLevelAccessor"
   ]
 }

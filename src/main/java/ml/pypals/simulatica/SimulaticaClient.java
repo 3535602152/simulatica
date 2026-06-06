@@ -5,6 +5,8 @@ import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.LitematicaSchematic;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacementManager;
+import fi.dy.masa.litematica.tool.ToolMode;
+import ml.pypals.simulatica.simulation.ServerLevelFactory;
 import ml.pypals.simulatica.simulation.SimulationManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -35,7 +37,7 @@ import java.util.List;
  * </pre>
  */
 public class SimulaticaClient implements ClientModInitializer {
-
+    public static ToolMode SIMULATE;
     @Override
     public void onInitializeClient() {
         registerTickEvent();
@@ -63,16 +65,23 @@ public class SimulaticaClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
                 dispatcher.register(ClientCommandManager.literal("simulatica")
 
-                        // /simulatica start [name]
                         .then(ClientCommandManager.literal("start")
                                 .executes(ctx -> {
-                                    startAll(ctx.getSource().getPlayer() == null
-                                            ? null
-                                            : ctx.getSource().getPlayer().getServer());
+                                    ctx.getSource().getPlayer();
+                                    startAll(ctx.getSource().getClient().getSingleplayerServer());
                                     sendFeedback("Started all schematic simulations.");
                                     return 1;
                                 })
                                 .then(ClientCommandManager.argument("placement_name", StringArgumentType.greedyString())
+                                        .suggests((context, builder) -> {
+                                            SchematicPlacementManager manager = DataManager.getSchematicPlacementManager();
+                                            for (SchematicPlacement placement : manager.getAllSchematicsPlacements()) {
+                                                if (placement.getName().toLowerCase().startsWith(builder.getRemainingLowerCase())) {
+                                                    builder.suggest(placement.getName());
+                                                }
+                                            }
+                                            return builder.buildFuture();
+                                        })
                                         .executes(ctx -> {
                                             String name = StringArgumentType.getString(ctx, "placement_name");
                                             startByName(name);
@@ -116,31 +125,27 @@ public class SimulaticaClient implements ClientModInitializer {
             return;
         }
 
-        List<LitematicaSchematic> found = collectLoadedSchematics();
+        List<SchematicPlacement> found = collectLoadedPlacements();
         if (found.isEmpty()) {
             sendFeedback("[Simulatica] No loaded schematic placements found.");
             return;
         }
 
-        for (LitematicaSchematic schematic : found) {
-            SimulationManager.getInstance().startSimulation(schematic, server);
+        for (SchematicPlacement placement : found) {
+            SimulationManager.getInstance().startSimulation(placement, server);
         }
-        sendFeedback("[Simulatica] Started simulations for " + found.size() + " schematic(s).");
+        sendFeedback("[Simulatica] Started simulations for " + found.size() + " placement(s).");
     }
 
     private static void startByName(String name) {
-        MinecraftServer server = resolveServer(null);
-        if (server == null) {
-            sendFeedback("[Simulatica] ERROR: Only supported in singleplayer.");
-            return;
-        }
+
 
         SchematicPlacementManager manager = DataManager.getSchematicPlacementManager();
         for (SchematicPlacement placement : manager.getAllSchematicsPlacements()) {
             if (placement.getName().equalsIgnoreCase(name)) {
                 LitematicaSchematic schematic = placement.getSchematic();
                 if (schematic != null) {
-                    SimulationManager.getInstance().startSimulation(schematic, server);
+                    SimulationManager.getInstance().startSimulation(placement, ServerLevelFactory.create(name));
                     sendFeedback("[Simulatica] Started simulation for placement '" + name + "'.");
                     return;
                 }
@@ -149,13 +154,12 @@ public class SimulaticaClient implements ClientModInitializer {
         sendFeedback("[Simulatica] No placement named '" + name + "' found.");
     }
 
-    private static List<LitematicaSchematic> collectLoadedSchematics() {
-        List<LitematicaSchematic> result = new ArrayList<>();
+    private static List<SchematicPlacement> collectLoadedPlacements() {
+        List<SchematicPlacement> result = new ArrayList<>();
         SchematicPlacementManager manager = DataManager.getSchematicPlacementManager();
         for (SchematicPlacement placement : manager.getAllSchematicsPlacements()) {
-            LitematicaSchematic schematic = placement.getSchematic();
-            if (schematic != null && !result.contains(schematic)) {
-                result.add(schematic);
+            if (placement.getSchematic() != null && !result.contains(placement)) {
+                result.add(placement);
             }
         }
         return result;

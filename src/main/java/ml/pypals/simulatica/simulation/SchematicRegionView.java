@@ -1,13 +1,17 @@
 package ml.pypals.simulatica.simulation;
 
+import fi.dy.masa.litematica.data.DataManager;
+import fi.dy.masa.litematica.schematic.SchematicMetadata;
 import fi.dy.masa.litematica.schematic.container.LitematicaBlockStateContainer;
+import fi.dy.masa.litematica.util.SchematicUtils;
+import fi.dy.masa.litematica.util.SchematicWorldRefresher;
 import ml.pypals.simulatica.mixin.LitematicaSchematicMixin;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import org.jetbrains.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -50,36 +54,24 @@ public class SchematicRegionView {
         this.sizeZ = rawSize != null ? Math.abs(rawSize.getZ()) : 0;
     }
 
-    // -------------------------------------------------------------------------
-    // Bounds
-    // -------------------------------------------------------------------------
-
-    /** Returns {@code true} if {@code pos} lies within the valid container range. */
     public boolean isInRegion(BlockPos pos) {
         int x = pos.getX(), y = pos.getY(), z = pos.getZ();
         return x >= 0 && x < sizeX
             && y >= 0 && y < sizeY
             && z >= 0 && z < sizeZ;
     }
-
-    // -------------------------------------------------------------------------
-    // Block state access
-    // -------------------------------------------------------------------------
-
     public BlockState getBlockState(BlockPos pos) {
         if (!isInRegion(pos)) return Blocks.AIR.defaultBlockState();
         return container.get(pos.getX(), pos.getY(), pos.getZ());
     }
 
-    public void setBlockState(BlockPos pos, BlockState state) {
+    public void setBlockState(BlockPos pos, BlockState state, SchematicSimulation simulation) {
         if (isInRegion(pos)) {
             container.set(pos.getX(), pos.getY(), pos.getZ(), state);
+
+            refresh(simulation);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Tile-entity (NBT) access
-    // -------------------------------------------------------------------------
 
     @Nullable
     public CompoundTag getTileEntityNbt(BlockPos pos) {
@@ -87,14 +79,25 @@ public class SchematicRegionView {
         return tileEntityMap.get(pos);
     }
 
-    public void setTileEntityNbt(BlockPos pos, CompoundTag nbt) {
+    public void setTileEntityNbt(BlockPos pos, CompoundTag nbt, SchematicSimulation simulation) {
         if (isInRegion(pos)) {
             tileEntityMap.put(pos.immutable(), nbt);
+            refresh(simulation);
+
         }
     }
 
-    public void removeTileEntityNbt(BlockPos pos) {
+    public void refresh(SchematicSimulation simulation){
+        SchematicMetadata metadata = simulation.getSchematic().getMetadata();
+        metadata.setTimeModifiedToNow();
+        metadata.setModifiedSinceSaved();
+        DataManager.getSchematicPlacementManager().markAllPlacementsOfSchematicForRebuild(simulation.getSchematic());
+
+
+    }
+    public void removeTileEntityNbt(BlockPos pos, SchematicSimulation simulation) {
         tileEntityMap.remove(pos);
+        refresh(simulation);
     }
 
     /** Direct access to the raw map — used for iteration in BE ticking. */

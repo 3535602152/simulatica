@@ -1,7 +1,9 @@
 package ml.pypals.simulatica.simulation;
 
 import fi.dy.masa.litematica.schematic.LitematicaSchematic;
+import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.mixin.LitematicaSchematicMixin;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.*;
@@ -22,8 +24,8 @@ public class SimulationManager {
 
     private static final SimulationManager INSTANCE = new SimulationManager();
 
-    /** All currently running simulations: schematic → (regionName → simulation). */
-    private final Map<LitematicaSchematic, Map<String, SchematicSimulation>> active = new LinkedHashMap<>();
+    /** All currently running simulations: placement → (regionName → simulation). */
+    private final Map<SchematicPlacement, Map<String, SchematicSimulation>> active = new LinkedHashMap<>();
 
     private SimulationManager() {}
 
@@ -46,21 +48,24 @@ public class SimulationManager {
     // =========================================================================
 
     /**
-     * Starts simulations for every sub-region of {@code schematic}.
-     * If a simulation is already running for this schematic, it is left unchanged.
+     * Starts simulations for every sub-region of {@code placement}'s schematic.
+     * If a simulation is already running for this placement, it is left unchanged.
      *
-     * @param schematic the schematic whose regions should be simulated
+     * @param placement the placement whose regions should be simulated
      * @param server    the current singleplayer MinecraftServer
      */
-    public void startSimulation(LitematicaSchematic schematic, MinecraftServer server) {
-        if (active.containsKey(schematic)) {
-            Simulatica.LOGGER.warn("[Simulatica] Simulation already running for schematic '{}'",
-                    schematic.getMetadata().getName());
+    public void startSimulation(SchematicPlacement placement, MinecraftServer server) {
+        if (active.containsKey(placement)) {
+            Simulatica.LOGGER.warn("[Simulatica] Simulation already running for placement '{}'",
+                    placement.getName());
             return;
         }
 
-        ml.pypals.simulatica.mixin.LitematicaSchematicMixin accessor =
-                (ml.pypals.simulatica.mixin.LitematicaSchematicMixin) schematic;
+        LitematicaSchematic schematic = placement.getSchematic();
+        if (schematic == null) return;
+
+        LitematicaSchematicMixin accessor =
+                (LitematicaSchematicMixin) schematic;
 
         Set<String> regions = accessor.sim$getBlockContainers().keySet();
         if (regions.isEmpty()) {
@@ -84,32 +89,70 @@ public class SimulationManager {
         }
 
         if (!perSchematic.isEmpty()) {
-            active.put(schematic, perSchematic);
+            active.put(placement, perSchematic);
+        }
+    }
+    public void startSimulation(SchematicPlacement placement, SimulatedServerLevel level) {
+        if (active.containsKey(placement)) {
+            Simulatica.LOGGER.warn("[Simulatica] Simulation already running for placement '{}'",
+                    placement.getName());
+            return;
+        }
+
+        LitematicaSchematic schematic = placement.getSchematic();
+        if (schematic == null) return;
+
+        LitematicaSchematicMixin accessor =
+                (LitematicaSchematicMixin) schematic;
+
+        Set<String> regions = accessor.sim$getBlockContainers().keySet();
+        if (regions.isEmpty()) {
+            Simulatica.LOGGER.warn("[Simulatica] Schematic '{}' has no regions, nothing to simulate",
+                    schematic.getMetadata().getName());
+            return;
+        }
+
+        Map<String, SchematicSimulation> perSchematic = new LinkedHashMap<>();
+        for (String region : regions) {
+            try {
+                SchematicSimulation sim = new SchematicSimulation(schematic, region, level);
+                sim.start();
+                perSchematic.put(region, sim);
+                Simulatica.LOGGER.info("[Simulatica] Started simulation: schematic='{}' region='{}'",
+                        schematic.getMetadata().getName(), region);
+            } catch (Exception e) {
+                Simulatica.LOGGER.error("[Simulatica] Failed to start simulation for region '{}': {}",
+                        region, e.getMessage(), e);
+            }
+        }
+
+        if (!perSchematic.isEmpty()) {
+            active.put(placement, perSchematic);
         }
     }
 
     /**
-     * Stops all simulations for {@code schematic}, flushing cached block-entity state back
+     * Stops all simulations for {@code placement}, flushing cached block-entity state back
      * to the schematic's NBT maps.
      */
-    public void stopSimulation(LitematicaSchematic schematic) {
-        Map<String, SchematicSimulation> perSchematic = active.remove(schematic);
+    public void stopSimulation(SchematicPlacement placement) {
+        Map<String, SchematicSimulation> perSchematic = active.remove(placement);
         if (perSchematic == null) {
-            Simulatica.LOGGER.warn("[Simulatica] No active simulation for schematic '{}'",
-                    schematic.getMetadata().getName());
+            Simulatica.LOGGER.warn("[Simulatica] No active simulation for placement '{}'",
+                    placement.getName());
             return;
         }
         for (SchematicSimulation sim : perSchematic.values()) {
             sim.stop();
         }
-        Simulatica.LOGGER.info("[Simulatica] Stopped all simulations for schematic '{}'",
-                schematic.getMetadata().getName());
+        Simulatica.LOGGER.info("[Simulatica] Stopped all simulations for placement '{}'",
+                placement.getName());
     }
 
     /** Stops all active simulations (e.g., on world unload). */
     public void stopAll() {
-        for (LitematicaSchematic schematic : new ArrayList<>(active.keySet())) {
-            stopSimulation(schematic);
+        for (SchematicPlacement placement : new ArrayList<>(active.keySet())) {
+            stopSimulation(placement);
         }
     }
 
@@ -117,8 +160,8 @@ public class SimulationManager {
     // Queries
     // =========================================================================
 
-    public boolean isSimulating(LitematicaSchematic schematic) {
-        return active.containsKey(schematic);
+    public boolean isSimulating(SchematicPlacement placement) {
+        return active.containsKey(placement);
     }
 
     /** Returns a read-only snapshot of all active simulations (flattened). */

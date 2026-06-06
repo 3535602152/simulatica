@@ -10,6 +10,7 @@ import net.minecraft.world.ticks.ScheduledTick;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -39,6 +40,10 @@ public interface LitematicaSchematicMixin {
     /** Pending fluid scheduled ticks, keyed by sub-region name then by container-local BlockPos. */
     @Accessor("pendingFluidTicks")
     Map<String, Map<BlockPos, ScheduledTick<Fluid>>> sim$getPendingFluidTicks();
+
+    /** Entities, keyed by sub-region name. */
+    @Accessor("entities")
+    Map<String, List<LitematicaSchematic.EntityInfo>> sim$getEntities();
 
     /**
      * Offset of each sub-region relative to the schematic origin (0, 0, 0).
