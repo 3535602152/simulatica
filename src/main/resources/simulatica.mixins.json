@@ -6,7 +6,11 @@
     "InputHandlerMixin",
     "LitematicaSchematicMixin",
     "ToolModeMixin",
-    "simulation.ServerAccessor"
+    "patch.BlockBehaviourMixin",
+    "patch.EntityMixin",
+    "patch.ItemMixin",
+    "simulation.SimLevelAccessor",
+    "simulation.SimServerLevelAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

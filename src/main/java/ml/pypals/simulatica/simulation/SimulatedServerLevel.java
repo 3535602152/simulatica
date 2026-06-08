@@ -1,28 +1,45 @@
 package ml.pypals.simulatica.simulation;
 
-import fi.dy.masa.litematica.schematic.SchematicMetadata;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
+import com.google.common.collect.Lists;
+import ml.pypals.simulatica.mixin.simulation.SimLevelAccessor;
+import ml.pypals.simulatica.mixin.simulation.SimServerLevelAccessor;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.*;
+import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.RandomSequences;
+import net.minecraft.server.waypoints.ServerWaypointManager;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.TickRateManager;
+import net.minecraft.world.attribute.EnvironmentAttributeSystem;
+import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.flag.FeatureFlagSet;
+import net.minecraft.world.item.alchemy.PotionBrewing;
+import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.level.*;
+import net.minecraft.world.level.block.BaseRailBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.FuelValues;
+import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
-import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.gameevent.GameEventListener;
+import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
 import net.minecraft.world.level.redstone.Orientation;
-import net.minecraft.world.level.storage.LevelStorageSource;
-import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.ticks.LevelTicks;
 import net.minecraft.world.ticks.ScheduledTick;
@@ -31,42 +48,90 @@ import net.minecraft.world.ticks.TickPriority;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
 
 public class SimulatedServerLevel extends ServerLevel {
 
     @Nullable private SchematicSimulation simulation;
-
-
     @Nullable private SimulatedLevelTicks<Block> simBlockTicks;
     @Nullable private SimulatedLevelTicks<Fluid> simFluidTicks;
 
-    SimulatedServerLevel(
-            MinecraftServer server,
-            java.util.concurrent.Executor executor,
-            LevelStorageSource.LevelStorageAccess storageAccess,
-            ServerLevelData levelData,
-            ResourceKey<Level> dimension,
-            LevelStem levelStem,
-            boolean debug,
-            long seed,
-            List<CustomSpawner> spawners,
-            boolean tickTime,
-            @Nullable RandomSequences randomSequences) {
-        super(server, executor, storageAccess, levelData, dimension,
-              levelStem, debug, seed, spawners, tickTime, randomSequences);
+    protected final CollectingNeighborUpdater neighborUpdater;
+
+    private SimulatedServerLevel() {
+        super(null, null, null, null, null, null, false, 0, java.util.Collections.emptyList(), false, null);
+        throw new UnsupportedOperationException("Use create() to bypass constructor");
     }
 
-    public static SimulatedServerLevel create(String regionName, MinecraftServer server) {
-        return ServerLevelFactory.create(regionName, server);
+    public static SimulatedServerLevel create(String regionName) {
+        try {
+            java.lang.reflect.Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            sun.misc.Unsafe unsafe = (sun.misc.Unsafe) f.get(null);
+            SimulatedServerLevel serverLevel= (SimulatedServerLevel) unsafe.allocateInstance(SimulatedServerLevel.class);
+            ((SimLevelAccessor) serverLevel).setNeighborUpdater(new CollectingNeighborUpdater(serverLevel, 1000000));
+
+            assert Minecraft.getInstance().level != null;
+            ((SimLevelAccessor) serverLevel).setRandomSource(Minecraft.getInstance().level.getRandom().fork());
+            ((SimLevelAccessor) serverLevel).setSafeRandomSource(RandomSource.createThreadSafe());
+            ((SimServerLevelAccessor) serverLevel).setGameEventDispatcher(new SimulatedGameEventDispatcher(serverLevel));
+            ((SimLevelAccessor) serverLevel).setBlockEntityTickers(Lists.newArrayList());
+            ((SimLevelAccessor) serverLevel).setPendingBlockEntityTickers(Lists.newArrayList());
+
+            return serverLevel;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to allocate SimulatedServerLevel via Unsafe", e);
+        }
+    }
+
+    private <T extends BlockEntity> void addGameEventListener(T blockEntity, ServerLevel serverLevel) {
+        Block block = blockEntity.getBlockState().getBlock();
+        if (block instanceof EntityBlock) {
+            GameEventListener gameEventListener = ((EntityBlock)block).getListener(serverLevel, blockEntity);
+            if (gameEventListener != null) {
+                SimulatedGameEventDispatcher simulatedGameEventDispatcher = (SimulatedGameEventDispatcher) ((SimServerLevelAccessor) serverLevel).getGameEventDispatcher();
+                simulatedGameEventDispatcher.gameEventListenerRegistry.register(gameEventListener);
+            }
+        }
+    }
+    @Override
+    public boolean shouldTickBlocksAt(long l) {
+        return true;
+    }
+
+    @Override
+    public boolean shouldTickBlocksAt(BlockPos pos) {
+        return true;
+    }
+
+
+
+    private <T extends BlockEntity> void removeGameEventListener(T blockEntity, ServerLevel serverLevel) {
+        Block block = blockEntity.getBlockState().getBlock();
+        if (block instanceof EntityBlock) {
+            GameEventListener gameEventListener = ((EntityBlock)block).getListener(serverLevel, blockEntity);
+            if (gameEventListener != null) {
+                SimulatedGameEventDispatcher simulatedGameEventDispatcher = (SimulatedGameEventDispatcher) ((SimServerLevelAccessor) serverLevel).getGameEventDispatcher();
+                simulatedGameEventDispatcher.gameEventListenerRegistry.unregister(gameEventListener);
+            }
+        }
+    }
+
+    @Override
+    public @NonNull RegistryAccess registryAccess() {
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.registryAccess();
     }
 
     public void init(SchematicSimulation simulation) {
         this.simulation = simulation;
-        this.simBlockTicks = new SimulatedLevelTicks<>(l->true);
-        this.simFluidTicks = new SimulatedLevelTicks<>(l->true);
+        this.simBlockTicks = SimulatedLevelTicks.create();
+        this.simFluidTicks = SimulatedLevelTicks.create();
     }
 
     @Override
@@ -104,13 +169,16 @@ public class SimulatedServerLevel extends ServerLevel {
         if (oldState == newState) return false;
 
         boolean moveByPiston = (flags & Block.UPDATE_MOVE_BY_PISTON) != 0;
-        boolean preventDrops = (flags & Block.UPDATE_SUPPRESS_DROPS) == 0;
+        boolean preventDrops = (flags & Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS) == 0;
 
         Block oldBlock = oldState.getBlock();
         Block newBlock = newState.getBlock();
 
-        boolean hasOldBE = oldState.hasBlockEntity();
-        if (hasOldBE && oldState.hasBlockEntity() && !newState.shouldChangedStateKeepBlockEntity(oldState)) {
+        boolean isDifferentBlock = !oldState.is(newBlock);
+        
+        view.setBlockState(pos, newState, simulation);
+
+        if (isDifferentBlock && oldState.hasBlockEntity() && !newState.shouldChangedStateKeepBlockEntity(oldState)) {
             if (preventDrops) {
                 BlockEntity be = this.getBlockEntity(pos);
                 if (be != null) {
@@ -119,24 +187,20 @@ public class SimulatedServerLevel extends ServerLevel {
             }
             simulation.removeBlockEntity(pos);
         }
-
-        if ((hasOldBE || oldBlock instanceof net.minecraft.world.level.block.BaseRailBlock) && ((flags & Block.UPDATE_NEIGHBORS) != 0 || moveByPiston)) {
+        if ((isDifferentBlock || oldBlock instanceof BaseRailBlock) && ((flags & Block.UPDATE_NEIGHBORS) != 0 || moveByPiston)) {
             oldState.affectNeighborsAfterRemoval(this, pos, moveByPiston);
         }
 
-        view.setBlockState(pos, newState, simulation);
-
-        if ((flags & Block.UPDATE_KNOWN_SHAPE) == 0) {
+        if ((flags & Block.UPDATE_SKIP_ON_PLACE) == 0) {
             newState.onPlace(this, pos, oldState, moveByPiston);
         }
 
         if (newState.hasBlockEntity()) {
             BlockEntity blockEntity = this.getBlockEntity(pos);
-            if (blockEntity == null) {
-                simulation.createBlockEntity(pos, newState);
-            } else {
-                blockEntity.setBlockState(newState);
+            if (blockEntity != null) {
+                simulation.removeBlockEntity(pos);
             }
+            simulation.createBlockEntity(pos, newState);
         }
         BlockState current = this.getBlockState(pos);
         if (current == newState) {
@@ -169,6 +233,20 @@ public class SimulatedServerLevel extends ServerLevel {
     }
 
     @Override
+    public @NonNull FeatureFlagSet enabledFeatures(){
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.enabledFeatures();
+    }
+    @Override
+    public void sendBlockUpdated(@NonNull BlockPos blockPos, @NonNull BlockState blockState, @NonNull BlockState blockState2, int i) {
+        if (simulation != null && blockState2.hasBlockEntity()) {
+            BlockEntity be = this.getBlockEntity(blockPos);
+            if (be != null) {
+                simulation.cacheBlockEntity(be);
+            }
+        }
+    }
+    @Override
     public boolean removeBlock(@NonNull BlockPos pos, boolean move) {
         FluidState fluid = this.getFluidState(pos);
         return this.setBlock(pos, fluid.createLegacyBlock(),
@@ -193,11 +271,16 @@ public class SimulatedServerLevel extends ServerLevel {
     @Override
     public void setBlockEntity(@NonNull BlockEntity blockEntity) {
         if (simulation != null) simulation.cacheBlockEntity(blockEntity);
+        addGameEventListener(blockEntity, this);
     }
 
     @Override
     public void removeBlockEntity(@NonNull BlockPos pos) {
-        if (simulation != null) simulation.removeBlockEntity(pos);
+        if (simulation != null) {
+            BlockEntity blockEntity = simulation.getOrLoadBlockEntity(pos);
+            if (blockEntity != null) removeGameEventListener(blockEntity, this);
+            simulation.removeBlockEntity(pos);
+        }
     }
 
     @Override
@@ -207,6 +290,34 @@ public class SimulatedServerLevel extends ServerLevel {
         }
     }
 
+    public @NonNull DamageSources damageSources() {
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.damageSources();
+    }
+
+    public @NonNull EnvironmentAttributeSystem environmentAttributes(){
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.environmentAttributes();
+    };
+
+    public @NonNull PotionBrewing potionBrewing(){
+
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.potionBrewing();
+    };
+    public @NonNull GameRules getGameRules() {
+        return new GameRules(FeatureFlagSet.of());
+    }
+
+    public @NonNull FuelValues fuelValues(){
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.fuelValues();
+    };
+
+    @Override
+    public boolean mayInteract(@NonNull Entity entity, @NonNull BlockPos blockPos) {
+        return true;
+    }
     @Override
     public void scheduleTick(@NonNull BlockPos pos, @NonNull Block block, int delay, @NonNull TickPriority priority) {
         if (simBlockTicks != null) {
@@ -233,10 +344,6 @@ public class SimulatedServerLevel extends ServerLevel {
         scheduleTick(pos, fluid, delay, TickPriority.NORMAL);
     }
 
-    // =========================================================================
-    // Neighbour updates — 1.21.11 API: Orientation instead of BlockPos fromPos
-    // =========================================================================
-
     @Override
     public void updateNeighborsAt(@NonNull BlockPos pos, @NonNull Block block) {
         this.updateNeighborsAt(pos, block, null);
@@ -246,7 +353,6 @@ public class SimulatedServerLevel extends ServerLevel {
     public void updateNeighborsAt(@NonNull BlockPos pos, @NonNull Block block, @Nullable Orientation orientation) {
         if (simulation == null) return;
         SchematicRegionView view = simulation.getRegionView();
-        // Use the CollectingNeighborUpdater inherited from Level (safe to delegate)
         for (Direction dir : Direction.values()) {
             BlockPos neighbor = pos.relative(dir);
             if (view.isInRegion(neighbor)) {
@@ -260,21 +366,48 @@ public class SimulatedServerLevel extends ServerLevel {
         if (simulation == null) return;
         if (!simulation.getRegionView().isInRegion(pos)) return;
         BlockState state = this.getBlockState(pos);
-        // handleNeighborChanged(Level, BlockPos, Block, @Nullable Orientation, boolean)
         state.handleNeighborChanged(this, pos, block, orientation, false);
     }
 
+    @Override
+    public @NonNull ServerWaypointManager getWaypointManager() {
+        return new ServerWaypointManager();
+    }
     @Override
     public void neighborChanged(@NonNull BlockState state, @NonNull BlockPos pos, @NonNull Block block, @Nullable Orientation orientation, boolean movedByPiston) {
         if (simulation == null) return;
         if (!simulation.getRegionView().isInRegion(pos)) return;
         state.handleNeighborChanged(this, pos, block, orientation, movedByPiston);
     }
+    @Override
+    public void levelEvent(@Nullable Entity entity, int i, @NonNull BlockPos blockPos, int j) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.levelEvent(entity, i, blockPos, j);
+    }
+    @Override
+    public @NonNull WorldBorder getWorldBorder() {
+        return new WorldBorder();
+    }
 
-    // =========================================================================
-    // Spatial / bounds
-    // =========================================================================
+    public @NonNull RecipeManager recipeAccess() {
+        return new RecipeManager(new HolderLookup.Provider() {
+            @Override
+            public @NonNull Stream<ResourceKey<? extends Registry<?>>> listRegistryKeys() {
+                return Stream.empty();
+            }
 
+            @Override
+            public <T> @NonNull Optional<? extends HolderLookup.RegistryLookup<T>> lookup(ResourceKey<? extends Registry<? extends T>> resourceKey) {
+                return Optional.empty();
+            }
+        });
+    }
+
+    @Override
+    public @NonNull TickRateManager tickRateManager() {
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.tickRateManager();
+    }
     @Override
     public boolean isInWorldBounds(@NonNull BlockPos pos) {
         return simulation != null && simulation.getRegionView().isInRegion(pos);
@@ -295,30 +428,17 @@ public class SimulatedServerLevel extends ServerLevel {
     public boolean isLoaded(@NonNull BlockPos pos) {
         return simulation != null && simulation.getRegionView().isInRegion(pos);
     }
+    @Override
+    public boolean hasChunkAt(@NonNull BlockPos pos) { return true;}
 
-/*    @Override
-    public boolean hasChunkAt(@NonNull BlockPos pos) { return isLoaded(pos); }
-*/
     @Override
     public boolean hasChunk(int chunkX, int chunkZ) { return true; }
-
-    // =========================================================================
-    // Lighting (stubbed — simulation has no light engine)
-    // =========================================================================
 
     @Override
     public int getBrightness(@NonNull LightLayer type, @NonNull BlockPos pos) { return 15; }
 
-    // =========================================================================
-    // Environment / time (neutral stubs so blocks don't behave unexpectedly)
-    // =========================================================================
-
     @Override public boolean isThundering() { return false; }
     @Override public boolean isRaining()    { return false; }
-
-    // =========================================================================
-    // Chunk access — throws if any block code unexpectedly calls these
-    // =========================================================================
 
     @Override
     public @NonNull LevelChunk getChunkAt(@NonNull BlockPos pos) {
@@ -332,10 +452,6 @@ public class SimulatedServerLevel extends ServerLevel {
         }
         return null;
     }
-
-    // =========================================================================
-    // Entities — empty; no live entities inside a schematic simulation
-    // =========================================================================
 
     @Override
     public @NonNull List<Entity> getEntities(@Nullable Entity except, @NonNull AABB aabb,
@@ -371,10 +487,6 @@ public class SimulatedServerLevel extends ServerLevel {
         return simulation.addFreshEntity(entity);
     }
 
-    // =========================================================================
-    // Heightmap
-    // =========================================================================
-
     @Override
     public int getHeight(Heightmap.@NonNull Types type, int x, int z) {
         if (simulation == null) return 0;
@@ -385,12 +497,100 @@ public class SimulatedServerLevel extends ServerLevel {
         return 0;
     }
 
-    // =========================================================================
-    // Tick loop — managed externally by SchematicSimulation; no-op here
-    // =========================================================================
-
     @Override
     public void tick(@NonNull BooleanSupplier hasTimeLeft) {
-        // Intentionally empty — SchematicSimulation.tick() drives the simulation
     }
+
+    public boolean isBrightOutside() {
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.isBrightOutside();
+    }
+
+    public boolean isDarkOutside() {
+        assert Minecraft.getInstance().level != null;
+        return Minecraft.getInstance().level.isDarkOutside();
+    }
+
+    @Override
+    public void playSound(@Nullable Entity entity, BlockPos blockPos, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float f, float g) {
+        this.playSound(entity, blockPos.getX() + 0.5, blockPos.getY() + 0.5, blockPos.getZ() + 0.5, soundEvent, soundSource, f, g);
+    }
+
+    public void playSeededSound(
+            @Nullable Entity entity, double d, double e, double f, @NonNull Holder<SoundEvent> holder, @NonNull SoundSource soundSource, float g, float h, long l
+    ){
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playSeededSound(entity, d,rainLevel, f,holder, soundSource,g,h,l);
+    };
+
+    public void playSeededSound(@Nullable Entity entity, double d, double e, double f, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float g, float h, long l) {
+        this.playSeededSound(entity, d, e, f, BuiltInRegistries.SOUND_EVENT.wrapAsHolder(soundEvent), soundSource, g, h, l);
+    }
+
+    public void playSeededSound(@Nullable Entity entity, @NonNull Entity entity2, @NonNull Holder<SoundEvent> holder, @NonNull SoundSource soundSource, float f, float g, long l){
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playSeededSound(entity, entity2, holder, soundSource, f,g,l);
+    }
+
+    public void playSound(@Nullable Entity entity, double d, double e, double f, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource) {
+        this.playSound(entity, d, e, f, soundEvent, soundSource, 1.0F, 1.0F);
+    }
+
+    public void playSound(@Nullable Entity entity, double d, double e, double f, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float g, float h) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playSound(entity, d, e, f, soundEvent, soundSource, g, h);
+    }
+
+    public void playSound(@Nullable Entity entity, double d, double e, double f, @NonNull Holder<SoundEvent> holder, @NonNull SoundSource soundSource, float g, float h) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playSound(entity, d, e, f, holder, soundSource, g, h);
+    }
+
+    public void playSound(@Nullable Entity entity, @NonNull Entity entity2, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float f, float g) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playSound(entity, entity2, soundEvent, soundSource, f, g);
+    }
+
+    public void playLocalSound(@NonNull BlockPos blockPos, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float f, float g, boolean bl) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playLocalSound(blockPos, soundEvent, soundSource, f, g, bl);
+    }
+
+    public void playLocalSound(@NonNull Entity entity, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float f, float g) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playLocalSound(entity, soundEvent, soundSource, f, g);
+    }
+
+    public void playLocalSound(double d, double e, double f, @NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float g, float h, boolean bl) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.playLocalSound(d,e,f, soundEvent, soundSource, g, h, bl);
+    }
+
+    public void playPlayerSound(@NonNull SoundEvent soundEvent, @NonNull SoundSource soundSource, float f, float g) {
+        assert Minecraft.getInstance().level != null;
+        assert Minecraft.getInstance().player != null;
+        Minecraft.getInstance().level.playLocalSound(Minecraft.getInstance().player, soundEvent, soundSource, f, g);
+    }
+
+    @Override
+    public void addParticle(@NonNull ParticleOptions particleOptions, double d, double e, double f, double g, double h, double i) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.addParticle(particleOptions, d,e,f, g, h, i);
+    }
+
+    public void addParticle(@NonNull ParticleOptions particleOptions, boolean bl, boolean bl2, double d, double e, double f, double g, double h, double i) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.addParticle(particleOptions,bl,bl2, d,e,f, g, h, i);
+    }
+
+    public void addAlwaysVisibleParticle(@NonNull ParticleOptions particleOptions, double d, double e, double f, double g, double h, double i) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.addAlwaysVisibleParticle(particleOptions, d,e,f, g, h, i);
+    }
+
+    public void addAlwaysVisibleParticle(@NonNull ParticleOptions particleOptions, boolean bl, double d, double e, double f, double g, double h, double i) {
+        assert Minecraft.getInstance().level != null;
+        Minecraft.getInstance().level.addAlwaysVisibleParticle(particleOptions, bl, d,e,f, g, h, i);
+    }
+
 }

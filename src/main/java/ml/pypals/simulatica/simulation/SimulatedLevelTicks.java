@@ -2,41 +2,54 @@ package ml.pypals.simulatica.simulation;
 
 import it.unimi.dsi.fastutil.objects.ObjectOpenCustomHashSet;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.ticks.LevelTickAccess;
 import net.minecraft.world.ticks.LevelTicks;
 import net.minecraft.world.ticks.ScheduledTick;
 import org.jspecify.annotations.NonNull;
 
+import java.lang.reflect.Field;
 import java.util.ArrayDeque;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.Set;
 import java.util.function.BiConsumer;
-import java.util.function.LongPredicate;
 
-/**
- * A lightweight, chunkless implementation of {@link LevelTickAccess} designed
- * specifically for simulation regions.
- *
- * <p>Unlike the vanilla {@link net.minecraft.world.ticks.LevelTicks}, which organizes
- * ticks into chunk-specific containers and handles chunk loading/unloading semantics,
- * this implementation uses a single global priority queue. This is ideal for our
- * self-contained, in-memory simulations where chunks do not exist.</p>
- */
+import sun.misc.Unsafe;
+
 public class SimulatedLevelTicks<T> extends LevelTicks<T> {
 
-    // All pending ticks, sorted by execution time and priority.
-    private final PriorityQueue<ScheduledTick<T>> pendingTicks = new PriorityQueue<>(ScheduledTick.DRAIN_ORDER);
+    private PriorityQueue<ScheduledTick<T>> pendingTicks;
 
-    // Fast lookup to prevent duplicate scheduling of the same block/type combo.
-    private final Set<ScheduledTick<?>> ticksPerPosition = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
+    private Set<ScheduledTick<?>> ticksPerPosition;
 
-    // Ticks pulled from pendingTicks that are scheduled to execute in the current tick.
-    private final Queue<ScheduledTick<T>> toRunThisTick = new ArrayDeque<>();
-    private final Set<ScheduledTick<?>> toRunThisTickSet = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
+    private Queue<ScheduledTick<T>> toRunThisTick;
+    private Set<ScheduledTick<?>> toRunThisTickSet;
 
-    public SimulatedLevelTicks(LongPredicate longPredicate) {
-        super(longPredicate);
+    private SimulatedLevelTicks() {
+        super(null);
+        throw new UnsupportedOperationException("Instantiate via create() to bypass constructor");
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> SimulatedLevelTicks<T> create() {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            Unsafe unsafe = (Unsafe) f.get(null);
+
+            SimulatedLevelTicks<T> instance = (SimulatedLevelTicks<T>) unsafe
+                    .allocateInstance(SimulatedLevelTicks.class);
+            instance.init();
+            return instance;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to allocate SimulatedLevelTicks via Unsafe", e);
+        }
+    }
+
+    private void init() {
+        this.pendingTicks = new PriorityQueue<>(ScheduledTick.DRAIN_ORDER);
+        this.ticksPerPosition = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
+        this.toRunThisTick = new ArrayDeque<>();
+        this.toRunThisTickSet = new ObjectOpenCustomHashSet<>(ScheduledTick.UNIQUE_TICK_HASH);
     }
 
     @Override
@@ -62,15 +75,7 @@ public class SimulatedLevelTicks<T> extends LevelTicks<T> {
         return this.pendingTicks.size() + this.toRunThisTick.size();
     }
 
-    /**
-     * Executes ticks whose scheduled time is &le; {@code gameTime}.
-     *
-     * @param gameTime The current simulation time.
-     * @param maxTicks The maximum number of ticks to process in this call (prtevents infinite loops if ticks schedule themselves instantly).
-     * @param ticker   The logic to execute for each tick.
-     */
     public void tick(long gameTime, int maxTicks, @NonNull BiConsumer<BlockPos, T> ticker) {
-        // 1. Drain pending ticks that are due, up to maxTicks
         while (this.toRunThisTick.size() < maxTicks) {
             ScheduledTick<T> peeked = this.pendingTicks.peek();
             if (peeked == null || peeked.triggerTick() > gameTime) {
@@ -81,7 +86,6 @@ public class SimulatedLevelTicks<T> extends LevelTicks<T> {
             this.toRunThisTick.add(polled);
         }
 
-        // 2. Execute collected ticks
         while (!this.toRunThisTick.isEmpty()) {
             ScheduledTick<T> tick = this.toRunThisTick.poll();
             if (!this.toRunThisTickSet.isEmpty()) {
@@ -89,8 +93,6 @@ public class SimulatedLevelTicks<T> extends LevelTicks<T> {
             }
             ticker.accept(tick.pos(), tick.type());
         }
-
-        // 3. Cleanup
         this.toRunThisTickSet.clear();
     }
 

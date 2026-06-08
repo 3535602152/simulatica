@@ -20,6 +20,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
@@ -65,7 +66,8 @@ public class SchematicSimulation {
     final SimulatedLevelTicks<Fluid> fluidTicks;
 
     // Block-event queue populated by SimulatedServerLevel.addBlockEvent(...)
-    private final List<BlockEventData> pendingBlockEvents = new ArrayList<>();
+    private final LinkedHashSet<BlockEventData> pendingBlockEvents = new LinkedHashSet<>();
+    private final List<BlockEventData> blockEventsToReschedule = new ArrayList<>(64);
 
     // Live block-entity cache: container-local BlockPos → BlockEntity instance.
     // Source of truth is the schematic's tileEntityMap; this cache is a live view.
@@ -81,31 +83,19 @@ public class SchematicSimulation {
     // Constructor
     // =========================================================================
 
-    public SchematicSimulation(LitematicaSchematic schematic, String regionName, MinecraftServer server) {
+    public SchematicSimulation(LitematicaSchematic schematic, String regionName) {
         this.schematic  = schematic;
         this.accessor   = (LitematicaSchematicMixin) schematic;
         this.regionName = regionName;
         this.regionView = new SchematicRegionView(accessor, regionName);
 
         // Build the fake level first (phase 1 — no simulation bound yet)
-        this.level = SimulatedServerLevel.create(regionName, server);
+        this.level = SimulatedServerLevel.create(regionName);
 
         // Phase 2 — bind simulation → level → tick queues
         this.level.init(this);
 
         // Fetch tick queues after init() populates them
-        this.blockTicks = (SimulatedLevelTicks<Block>) this.level.getBlockTicks();
-        this.fluidTicks = (SimulatedLevelTicks<Fluid>) this.level.getFluidTicks();
-    }
-
-    public SchematicSimulation(LitematicaSchematic schematic, String regionName, SimulatedServerLevel server) {
-        this.schematic  = schematic;
-        this.accessor   = (LitematicaSchematicMixin) schematic;
-        this.regionName = regionName;
-        this.regionView = new SchematicRegionView(accessor, regionName);
-        this.level = server;
-        this.level.init(this);
-
         this.blockTicks = (SimulatedLevelTicks<Block>) this.level.getBlockTicks();
         this.fluidTicks = (SimulatedLevelTicks<Fluid>) this.level.getFluidTicks();
     }
@@ -151,20 +141,12 @@ public class SchematicSimulation {
         ) return;
         gameTime++;
 
-        // 1. Block ticks
         level.getBlockTicks().tick(gameTime, 65536, this::tickBlock);
-
-        // 2. Fluid ticks
         level.getFluidTicks().tick(gameTime, 65536, this::tickFluid);
-
-        // 3. Block events (pistons, etc.)
         runBlockEvents();
-
-        // 4. Entities
         tickEntities();
-
-        // 5. Block-entity tickers
-        tickBlockEntities();
+        level.tickBlockEntities();
+        regionView.tryRefresh(this);
     }
 
     // =========================================================================
@@ -188,28 +170,30 @@ public class SchematicSimulation {
     }
 
     private void runBlockEvents() {
-        if (pendingBlockEvents.isEmpty()) return;
+        blockEventsToReschedule.clear();
 
-        // Work on a snapshot to allow re-entrancy (events can add more events)
-        List<BlockEventData> snapshot = new ArrayList<>(pendingBlockEvents);
-        pendingBlockEvents.clear();
+        while (!pendingBlockEvents.isEmpty()) {
+            Iterator<BlockEventData> iterator = pendingBlockEvents.iterator();
+            BlockEventData event = iterator.next();
+            iterator.remove();
 
-        for (BlockEventData event : snapshot) {
-            BlockState state = regionView.getBlockState(event.pos());
-            if (state.is(event.block())) {
-                try {
-                    state.triggerEvent(level, event.pos(), event.paramA(), event.paramB());
-                } catch (Exception e) {
-                    Simulatica.LOGGER.error("[Simulatica] Exception during block event at {}: {}",
-                            event.pos(), e.getMessage(), e);
+            if (level.shouldTickBlocksAt(event.pos())) {
+                BlockState state = regionView.getBlockState(event.pos());
+                if (state.is(event.block())) {
+                    try {
+                        state.triggerEvent(level, event.pos(), event.paramA(), event.paramB());
+                    } catch (Exception e) {
+                        Simulatica.LOGGER.error("[Simulatica] Exception during block event at {}: {}",
+                                event.pos(), e.getMessage(), e);
+                    }
                 }
+            } else {
+                blockEventsToReschedule.add(event);
             }
         }
-    }
 
-    // =========================================================================
-    // Entity ticking
-    // =========================================================================
+        pendingBlockEvents.addAll(blockEventsToReschedule);
+    }
 
     private void tickEntities() {
         for (int i = 0; i < entities.size(); i++) {
@@ -243,36 +227,29 @@ public class SchematicSimulation {
     // Block-entity ticking
     // =========================================================================
 
-    private void tickBlockEntities() {
-        // Snapshot keys to allow modification inside tick()
-        List<BlockPos> positions = new ArrayList<>(blockEntityCache.keySet());
-
-        for (BlockPos pos : positions) {
-            BlockEntity be = blockEntityCache.get(pos);
-            if (be == null || be.isRemoved()) {
-                blockEntityCache.remove(pos);
-                continue;
-            }
-
-            BlockState state = regionView.getBlockState(pos);
-            if (!state.hasBlockEntity()) continue;
-            if (!(state.getBlock() instanceof EntityBlock entityBlock)) continue;
-
-            if (be.getLevel() == null) be.setLevel(level);
-
-            try {
-                @SuppressWarnings("unchecked")
-                BlockEntityTicker<BlockEntity> ticker =
-                        (BlockEntityTicker<BlockEntity>) entityBlock.getTicker(level, state, be.getType());
-                if (ticker != null) {
-                    ticker.tick(level, pos, state, be);
-                    // Flush live BE state back to schematic NBT after each tick
-                    persistBlockEntity(be);
+    private void registerTicker(BlockPos pos, BlockState state, BlockEntity be) {
+        if (!(state.getBlock() instanceof EntityBlock entityBlock)) return;
+        @SuppressWarnings("unchecked")
+        BlockEntityTicker<BlockEntity> ticker = (BlockEntityTicker<BlockEntity>) entityBlock.getTicker(level, state, be.getType());
+        if (ticker != null) {
+            level.addBlockEntityTicker(new TickingBlockEntity() {
+                @Override public void tick() {
+                    BlockState currentState = regionView.getBlockState(pos);
+                    if (currentState.hasBlockEntity()) {
+                        try {
+                            ticker.tick(level, pos, currentState, be);
+                        } catch (Exception e) {
+                            Simulatica.LOGGER.error("[Simulatica] Exception during BE tick at {} ({}): {}",
+                                    pos, be.getType(), e.getMessage(), e);
+                        }
+                    }
                 }
-            } catch (Exception e) {
-                Simulatica.LOGGER.error("[Simulatica] Exception during BE tick at {} ({}): {}",
-                        pos, be.getType(), e.getMessage(), e);
-            }
+                @Override public boolean isRemoved() {
+                    return be.isRemoved() || blockEntityCache.get(pos) != be;
+                }
+                @Override public BlockPos getPos() { return pos; }
+                @Override public String getType() { return be.getType().toString(); }
+            });
         }
     }
 
@@ -301,6 +278,7 @@ public class SchematicSimulation {
         be.setLevel(level);
         be.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING,level.registryAccess(),nbt));
         blockEntityCache.put(pos.immutable(), be);
+        registerTicker(pos, state, be);
         return be;
     }
 
@@ -313,6 +291,8 @@ public class SchematicSimulation {
         be.setLevel(level);
         blockEntityCache.put(pos, be);
         persistBlockEntity(be);
+        BlockState state = regionView.getBlockState(pos);
+        registerTicker(pos, state, be);
     }
 
     /** Removes a block entity from the cache and from the schematic's tile-entity map. */
@@ -333,6 +313,7 @@ public class SchematicSimulation {
         be.setLevel(level);
         blockEntityCache.put(pos.immutable(), be);
         persistBlockEntity(be);
+        registerTicker(pos, state, be);
     }
 
     // =========================================================================
@@ -391,6 +372,7 @@ public class SchematicSimulation {
             // 1.21.11: loadWithComponents(HolderLookup.Provider, CompoundTag)
             be.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING,registries,entry.getValue()));
             blockEntityCache.put(pos.immutable(), be);
+            registerTicker(pos, state, be);
         }
         Simulatica.LOGGER.info("[Simulatica] Loaded {} block entities for region '{}'",
                 blockEntityCache.size(), regionName);

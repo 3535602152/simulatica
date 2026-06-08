@@ -15,22 +15,10 @@ import org.jetbrains.annotations.Nullable;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * A thin, coordinate-aware view over one sub-region of a {@link fi.dy.masa.litematica.schematic.LitematicaSchematic}.
- *
- * <h2>Coordinate system</h2>
- * The simulation operates entirely in <em>container-local</em> (region-local) coordinates:
- * <ul>
- *   <li>X in {@code [0, sizeX)}</li>
- *   <li>Y in {@code [0, sizeY)}</li>
- *   <li>Z in {@code [0, sizeZ)}</li>
- * </ul>
- * This matches the coordinate space used by {@link LitematicaBlockStateContainer} and the
- * tile-entity maps inside the schematic.  The schematic-level {@code subRegionPositions} offset
- * is intentionally ignored here — inter-region communication is not supported (see Q3).
- */
+
 public class SchematicRegionView {
 
+    public boolean refreshScheduled = false;
     private final String regionName;
     private final LitematicaBlockStateContainer container;
     private final Map<BlockPos, CompoundTag> tileEntityMap;
@@ -43,7 +31,6 @@ public class SchematicRegionView {
 
         this.container = accessor.sim$getBlockContainers().get(regionName);
 
-        // Ensure tileEntityMap exists (freshly created schematics might be missing it)
         Map<String, Map<BlockPos, CompoundTag>> teParent = accessor.sim$getTileEntities();
         teParent.computeIfAbsent(regionName, k -> new HashMap<>());
         this.tileEntityMap = teParent.get(regionName);
@@ -69,7 +56,7 @@ public class SchematicRegionView {
         if (isInRegion(pos)) {
             container.set(pos.getX(), pos.getY(), pos.getZ(), state);
 
-            refresh(simulation);
+            markDirty();
         }
     }
 
@@ -82,32 +69,31 @@ public class SchematicRegionView {
     public void setTileEntityNbt(BlockPos pos, CompoundTag nbt, SchematicSimulation simulation) {
         if (isInRegion(pos)) {
             tileEntityMap.put(pos.immutable(), nbt);
-            refresh(simulation);
+            markDirty();
 
         }
     }
 
-    public void refresh(SchematicSimulation simulation){
-        SchematicMetadata metadata = simulation.getSchematic().getMetadata();
-        metadata.setTimeModifiedToNow();
-        metadata.setModifiedSinceSaved();
-        DataManager.getSchematicPlacementManager().markAllPlacementsOfSchematicForRebuild(simulation.getSchematic());
-
-
+    public void markDirty(){
+        refreshScheduled = true;
+    }
+    public void tryRefresh(SchematicSimulation simulation){
+        if(refreshScheduled){
+            SchematicMetadata metadata = simulation.getSchematic().getMetadata();
+            metadata.setTimeModifiedToNow();
+            metadata.setModifiedSinceSaved();
+            DataManager.getSchematicPlacementManager().markAllPlacementsOfSchematicForRebuild(simulation.getSchematic());
+            refreshScheduled = false;
+        }
     }
     public void removeTileEntityNbt(BlockPos pos, SchematicSimulation simulation) {
         tileEntityMap.remove(pos);
-        refresh(simulation);
+        markDirty();
     }
 
-    /** Direct access to the raw map — used for iteration in BE ticking. */
     public Map<BlockPos, CompoundTag> getTileEntityMap() {
         return tileEntityMap;
     }
-
-    // -------------------------------------------------------------------------
-    // Dimensions
-    // -------------------------------------------------------------------------
 
     public int getSizeX() { return sizeX; }
     public int getSizeY() { return sizeY; }
