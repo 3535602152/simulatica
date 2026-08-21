@@ -1,3 +1,6 @@
 {
-  "litematica.tool_mode.name.simulate": "模拟交互"
+  "litematica.tool_mode.name.simulate": "模拟交互",
+  "simulatica.message.placement_not_simulated": "放置「%s」尚未启动模拟 — 请使用 /simulatica start",
+  "simulatica.message.no_simulation": "此处没有正在运行的模拟 — 请使用 /simulatica start",
+  "simulatica.message.no_schematic": "放置「%s」没有已加载的原理图"
 }

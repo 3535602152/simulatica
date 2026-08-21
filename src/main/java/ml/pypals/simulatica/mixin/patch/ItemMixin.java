@@ -7,9 +7,10 @@ import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacementManager;
 import fi.dy.masa.litematica.util.RayTraceUtils;
 import fi.dy.masa.malilib.util.EntityUtils;
-import ml.pypals.simulatica.simulation.SchematicSimulation;
-import ml.pypals.simulatica.simulation.SimulatedServerLevel;
+import ml.pypals.simulatica.simulation.server.ProjectionBridge;
+import ml.pypals.simulatica.simulation.server.SimulationLevel;
 import ml.pypals.simulatica.simulation.SimulationManager;
+import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
@@ -26,8 +27,8 @@ public class ItemMixin {
     @WrapMethod(method = "getPlayerPOVHitResult")
     private static BlockHitResult getPlayerPOVHitResult(Level level, Player player, ClipContext.Fluid fluid, Operation<BlockHitResult> original) {
         Entity entity = EntityUtils.getCameraEntity();
-        if(level instanceof SimulatedServerLevel && entity != null){
-            RayTraceUtils.RayTraceWrapper wrapper = RayTraceUtils.getSchematicWorldTraceWrapperIfClosest(level, entity, 10);
+        if(level instanceof SimulationLevel && entity != null && Minecraft.getInstance().level != null){
+            RayTraceUtils.RayTraceWrapper wrapper = RayTraceUtils.getSchematicWorldTraceWrapperIfClosest(Minecraft.getInstance().level, entity, 10);
             if (wrapper != null && wrapper.getHitType() == RayTraceUtils.RayTraceWrapper.HitType.SCHEMATIC_BLOCK) {
 
                 BlockHitResult hitResult = wrapper.getBlockHitResult();
@@ -38,16 +39,11 @@ public class ItemMixin {
                     if (part.getBox().containsPos(hitResult.getBlockPos())) {
                         SchematicPlacement placement = part.getPlacement();
                         String regionName = part.getSubRegionName();
-                        Map<String, SchematicSimulation> sims = SimulationManager.getInstance().getSimulations(placement);
+                        Map<String, ProjectionBridge> sims = SimulationManager.getInstance().getSimulations(placement);
                         if (sims != null) {
-                            SchematicSimulation sim = sims.get(regionName);
+                            ProjectionBridge sim = sims.get(regionName);
                             if (sim != null) {
-                                return new BlockHitResult(
-                                        hitResult.getLocation().subtract(placement.getOrigin().getCenter()),
-                                        hitResult.getDirection(),
-                                        hitResult.getBlockPos().subtract(placement.getOrigin()),
-                                        hitResult.isInside()
-                                );
+                                return hitResult;
                             }
                         }
                     }

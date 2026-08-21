@@ -38,3 +38,10 @@ hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+# decompiled reference sources, kept for reading only
+
+/fi/
+/net/
+/scratch/
+/reference/

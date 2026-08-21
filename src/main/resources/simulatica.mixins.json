@@ -3,14 +3,25 @@
   "package": "ml.pypals.simulatica.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "ChunkSchematicMixin",
+    "ClientPacketSendMixin",
     "InputHandlerMixin",
-    "LitematicaSchematicMixin",
+    "LocalPlayerContainerMixin",
+    "LocalPlayerDropMixin",
+    "MultiPlayerGameModeMenuMixin",
+    "PlayerOpenMenuMixin",
+    "SchematicEntityLookupInvoker",
     "ToolModeMixin",
-    "patch.BlockBehaviourMixin",
-    "patch.EntityMixin",
+    "WorldRendererSchematicMixin",
+    "WorldSchematicAccessor",
+    "WorldSchematicEntityMixin",
     "patch.ItemMixin",
-    "simulation.SimLevelAccessor",
-    "simulation.SimServerLevelAccessor"
+    "simulation.MenuScreensAccessor",
+    "simulation.MinecraftServerLevelsAccessor",
+    "simulation.MinecraftServerTickAccessor",
+    "simulation.ServerLevelBlockEventsAccessor",
+    "simulation.ServerLevelEntityManagerAccessor",
+    "simulation.SimPistonMovingBlockEntityAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
@@ -18,6 +29,5 @@
   "overwrites": {
     "requireAnnotations": true
   },
-  "client": [
-  ]
+  "client": []
 }
