@@ -3,15 +3,15 @@
 	"id": "simulatica",
 	"version": "${version}",
 	"name": "simulatica",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "Simulate minecraft inside Litematica!",
 	"authors": [
-		"Me!"
+		"Ryan100C"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://github.com/hotpad100c/simulatica",
+		"sources": "https://github.com/hotpad100c/simulatica"
 	},
-	"license": "CC0-1.0",
+	"license": "MIT",
 	"icon": "assets/simulatica/icon.png",
 	"environment": "*",
 	"entrypoints": {
