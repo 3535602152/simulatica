@@ -24,6 +24,7 @@ import net.minecraft.server.WorldLoader;
 import net.minecraft.server.WorldStem;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.progress.LevelLoadListener;
+import net.minecraft.server.notifications.NotificationManager;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
@@ -31,19 +32,19 @@ import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.server.players.NameAndId;
 import net.minecraft.util.Util;
 import net.minecraft.util.debugchart.LocalSampleLogger;
-import net.minecraft.world.Difficulty;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelSettings;
-import net.minecraft.world.RandomSequences;
 import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.WorldDimensions;
+import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.storage.DerivedLevelData;
+import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.PrimaryLevelData;
 import net.minecraft.world.level.storage.ServerLevelData;
@@ -59,9 +60,19 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - 26.2 构造与启动适配：MinecraftServer 构造器新增 Optional<GameRules>/NotificationManager、WorldStem 第 4 分量改 WorldDataAndGenSettings、LevelSettings 变 record、PrimaryLevelData 参数调整
+ * - attach 接受 preserved UUID 集合并在复制后加载 LeftoverStore 留档；新增 moveRegion / republishEntities / detachAll
+ */
 public final class SimulationServer extends MinecraftServer {
 
     private static final String SCRATCH_DIR = Simulatica.MOD_ID;
@@ -88,9 +99,11 @@ public final class SimulationServer extends MinecraftServer {
                              LevelStorageSource.LevelStorageAccess storage,
                              PackRepository packRepository,
                              WorldStem worldStem,
-                             Services services) {
-        super(thread, storage, packRepository, worldStem, Proxy.NO_PROXY,
-                Minecraft.getInstance().getFixerUpper(), services, NoopLevelLoadListener.INSTANCE);
+                             Services services,
+                             GameRules gameRules) {
+        super(thread, storage, packRepository, worldStem, Optional.of(gameRules), Proxy.NO_PROXY,
+                Minecraft.getInstance().getFixerUpper(), services, NoopLevelLoadListener.INSTANCE,
+                false, new NotificationManager());
         this.storage = storage;
         this.dataPackResources = worldStem.dataPackResources();
     }
@@ -120,10 +133,12 @@ public final class SimulationServer extends MinecraftServer {
         SimulationServer server;
         try {
             PackRepository packRepository = ServerPacksSource.createPackRepository(storage);
-            WorldStem worldStem = loadWorldStem(packRepository);
+            AtomicReference<GameRules> gameRules = new AtomicReference<>();
+            WorldStem worldStem = loadWorldStem(packRepository, gameRules);
             Services services = Services.create(new YggdrasilAuthenticationService(Proxy.NO_PROXY), root.toFile());
 
-            server = new SimulationServer(Thread.currentThread(), storage, packRepository, worldStem, services);
+            server = new SimulationServer(Thread.currentThread(), storage, packRepository, worldStem, services,
+                    gameRules.get());
             server.createSimulationLevels();
         } catch (Exception e) {
             storage.close();
@@ -173,7 +188,7 @@ public final class SimulationServer extends MinecraftServer {
      * Everything is read locally, so this works in
      * multiplayer too.
      */
-    private static WorldStem loadWorldStem(PackRepository packRepository) throws Exception {
+    private static WorldStem loadWorldStem(PackRepository packRepository, AtomicReference<GameRules> gameRulesOut) throws Exception {
         WorldLoader.InitConfig initConfig = new WorldLoader.InitConfig(
                 new WorldLoader.PackConfig(packRepository, WorldDataConfiguration.DEFAULT, false, true),
                 Commands.CommandSelection.INTEGRATED,
@@ -188,8 +203,14 @@ public final class SimulationServer extends MinecraftServer {
                             VoidDimensions.create(context.datapackWorldgen()).bake(none);
 
                     WorldData worldData = getWorldData(context, dimensions);
+                    gameRulesOut.set(new GameRules(context.dataConfiguration().enabledFeatures()));
 
-                    return new WorldLoader.DataLoadOutput<>(worldData, dimensions.dimensionsRegistryAccess());
+                    // 26.x wraps the world data together with the gen settings in the stem
+                    WorldGenSettings genSettings = new WorldGenSettings(
+                            new WorldOptions(SEED, false, false), new WorldDimensions(dimensions.dimensions()));
+                    return new WorldLoader.DataLoadOutput<>(
+                            new LevelDataAndDimensions.WorldDataAndGenSettings(worldData, genSettings),
+                            dimensions.dimensionsRegistryAccess());
                 },
                 WorldStem::new,
                 Util.backgroundExecutor(),
@@ -201,10 +222,10 @@ public final class SimulationServer extends MinecraftServer {
 
     private static @NonNull WorldData getWorldData(WorldLoader.DataLoadContext context, WorldDimensions.Complete dimensions) {
         LevelSettings settings =
-                new LevelSettings("Simulatica", GameType.CREATIVE, false, Difficulty.NORMAL, true,
-                new GameRules(context.dataConfiguration().enabledFeatures()), context.dataConfiguration());
+                new LevelSettings("Simulatica", GameType.CREATIVE,
+                        LevelSettings.DifficultySettings.DEFAULT, true, context.dataConfiguration());
 
-        return new PrimaryLevelData(settings, new WorldOptions(SEED, false, false), dimensions.specialWorldProperty(), dimensions.lifecycle());
+        return new PrimaryLevelData(settings, dimensions.specialWorldProperty(), dimensions.lifecycle());
     }
 
     /**
@@ -219,16 +240,14 @@ public final class SimulationServer extends MinecraftServer {
         WorldData worldData = this.getWorldData();
         ServerLevelData overworldData = worldData.overworldData();
         Registry<LevelStem> stems = this.registryAccess().lookupOrThrow(Registries.LEVEL_STEM);
-        long seed = BiomeManager.obfuscateSeed(worldData.worldGenOptions().seed());
+        long seed = BiomeManager.obfuscateSeed(SEED);
         Map<ResourceKey<Level>, ServerLevel> levels = ((MinecraftServerLevelsAccessor) (Object) this).simulatica$levels();
 
         // The overworld has to come first. Other dimensions will use it's data.
         SimulationLevel overworld = new SimulationLevel(this, Util.backgroundExecutor(), this.storage,
                 overworldData, Level.OVERWORLD, stems.getValueOrThrow(LevelStem.OVERWORLD),
-                seed, List.of(), true, null);
+                seed, List.of(), true);
         levels.put(Level.OVERWORLD, overworld);
-
-        RandomSequences sequences = overworld.getRandomSequences();
 
         for (Map.Entry<ResourceKey<LevelStem>, LevelStem> entry : stems.entrySet()) {
             if (entry.getKey().equals(LevelStem.OVERWORLD)) {
@@ -237,7 +256,7 @@ public final class SimulationServer extends MinecraftServer {
             ResourceKey<Level> dimension = ResourceKey.create(Registries.DIMENSION, entry.getKey().identifier());
             levels.put(dimension, new SimulationLevel(this, Util.backgroundExecutor(), this.storage,
                     new DerivedLevelData(worldData, overworldData), dimension, entry.getValue(),
-                    seed, List.of(), false, sequences));
+                    seed, List.of(), false));
         }
 
         for (ServerLevel level : this.getAllLevels()) {
@@ -255,7 +274,12 @@ public final class SimulationServer extends MinecraftServer {
      * Maps a box into the simulation level and copies the projection into it.
      * The box is laid out in its own region and force loaded.
      */
-    public ProjectionBridge attach(ResourceKey<Level> dimension, BlockPos worldMin, BlockPos worldMax, String label) {
+    /**
+     * @param preserved UUIDs of live leftovers the new bridge retakes; they must not be
+     *                  duplicated out of the projection.
+     */
+    public ProjectionBridge attach(ResourceKey<Level> dimension, BlockPos worldMin, BlockPos worldMax,
+                                   String label, Set<UUID> preserved) {
         SimulationLevel level = this.levelFor(dimension);
         SimulationRegion region = this.allocate(dimension, worldMin, worldMax, label);
 
@@ -264,17 +288,26 @@ public final class SimulationServer extends MinecraftServer {
         this.force(level, region);
         this.pumpUntilTicking(level, min, max);
 
+        // The store's state is newer than the schematic's, so its entities win the copy too.
+        Set<UUID> saved = LeftoverStore.savedIds(label);
+        Set<UUID> present = new HashSet<>(preserved);
+        present.addAll(saved);
+
         ProjectionBridge bridge = new ProjectionBridge(level, region, label);
-        int copied = bridge.copyIn();
+        int copied = bridge.copyIn(present);
         this.bridges.add(bridge);
         bridge.setViewer(SimulationViewer.create(this, level, region.simBounds().getCenter(), bridge::onPacket));
+
+        // Saved entities are not in the level yet -- only live leftovers and fresh copies are.
+        present.removeAll(saved);
+        LeftoverStore.load(label, level, present);
 
         if (copied == 0) {
             Simulatica.LOGGER.warn("[Simulatica] Attached '{}' but copied no blocks, is the projection loaded?",
                     label);
         } else {
             Simulatica.LOGGER.info("[Simulatica] Attached '{}' at [{}, {}]..[{}, {}], {} block(s) copied",
-                    label, min.x, min.z, max.x, max.z, copied);
+                    label, min.x(), min.z(), max.x(), max.z(), copied);
         }
         return bridge;
     }
@@ -300,13 +333,13 @@ public final class SimulationServer extends MinecraftServer {
             ((ServerLevelEntityManagerAccessor) level).simulatica$entityManager().tick();
         }
         Simulatica.LOGGER.warn("[Simulatica] Region [{}, {}]..[{}, {}] did not become ticking within {} ticks",
-                min.x, min.z, max.x, max.z, MAX_PROMOTION_TICKS);
+                min.x(), min.z(), max.x(), max.z(), MAX_PROMOTION_TICKS);
     }
 
     private static boolean allTicking(SimulationLevel level, ChunkPos min, ChunkPos max) {
-        for (int cx = min.x; cx <= max.x; cx++) {
-            for (int cz = min.z; cz <= max.z; cz++) {
-                long key = ChunkPos.asLong(cx, cz);
+        for (int cx = min.x(); cx <= max.x(); cx++) {
+            for (int cz = min.z(); cz <= max.z(); cz++) {
+                long key = ChunkPos.pack(cx, cz);
                 if (!level.areEntitiesLoaded(key) || !level.getChunkSource().isPositionTicking(key)) {
                     return false;
                 }
@@ -390,8 +423,8 @@ public final class SimulationServer extends MinecraftServer {
             SimulationRegion other = this.bridges.get(i).region();
             ChunkPos min = other.simChunkMin();
             ChunkPos max = other.simChunkMax();
-            if (chunkX >= min.x - TICKING_MARGIN_CHUNKS && chunkX <= max.x + TICKING_MARGIN_CHUNKS
-                    && chunkZ >= min.z - TICKING_MARGIN_CHUNKS && chunkZ <= max.z + TICKING_MARGIN_CHUNKS) {
+            if (chunkX >= min.x() - TICKING_MARGIN_CHUNKS && chunkX <= max.x() + TICKING_MARGIN_CHUNKS
+                    && chunkZ >= min.z() - TICKING_MARGIN_CHUNKS && chunkZ <= max.z() + TICKING_MARGIN_CHUNKS) {
                 return true;
             }
         }
@@ -401,8 +434,8 @@ public final class SimulationServer extends MinecraftServer {
     private static void forEachChunk(SimulationRegion region, ChunkConsumer action) {
         ChunkPos min = region.simChunkMin();
         ChunkPos max = region.simChunkMax();
-        for (int cx = min.x - TICKING_MARGIN_CHUNKS; cx <= max.x + TICKING_MARGIN_CHUNKS; cx++) {
-            for (int cz = min.z - TICKING_MARGIN_CHUNKS; cz <= max.z + TICKING_MARGIN_CHUNKS; cz++) {
+        for (int cx = min.x() - TICKING_MARGIN_CHUNKS; cx <= max.x() + TICKING_MARGIN_CHUNKS; cx++) {
+            for (int cz = min.z() - TICKING_MARGIN_CHUNKS; cz <= max.z() + TICKING_MARGIN_CHUNKS; cz++) {
                 action.accept(cx, cz);
             }
         }
@@ -470,22 +503,11 @@ public final class SimulationServer extends MinecraftServer {
             SimulationRegion region = bridge.region();
             ChunkPos min = region.simChunkMin();
             ChunkPos max = region.simChunkMax();
-            if (chunkX >= min.x && chunkX <= max.x && chunkZ >= min.z && chunkZ <= max.z) {
+            if (chunkX >= min.x() && chunkX <= max.x() && chunkZ >= min.z() && chunkZ <= max.z()) {
                 return true;
             }
         }
         return false;
-    }
-
-    @Nullable
-    public ProjectionBridge bridgeAt(BlockPos world) {
-        for (int i = 0; i < this.bridges.size(); i++) {
-            ProjectionBridge bridge = this.bridges.get(i);
-            if (bridge.region().containsSim(bridge.region().toSim(world))) {
-                return bridge;
-            }
-        }
-        return null;
     }
 
     private void grantTaskBudget() {
@@ -555,6 +577,16 @@ public final class SimulationServer extends MinecraftServer {
 
     @Override
     public int getRateLimitPacketsPerSecond() {
+        return 0;
+    }
+
+    @Override
+    public int getCommandSpamThresholdSeconds() {
+        return 0;
+    }
+
+    @Override
+    public int getChatSpamThresholdSeconds() {
         return 0;
     }
 

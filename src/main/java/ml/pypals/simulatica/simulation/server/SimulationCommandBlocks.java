@@ -14,6 +14,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - Minecraft.setScreen / screen → gui.setScreen / gui.screen()
+ */
 public final class SimulationCommandBlocks {
 
     @Nullable
@@ -33,13 +37,13 @@ public final class SimulationCommandBlocks {
         level = simulated;
         pos = blockEntity.getBlockPos().immutable();
         screen = new CommandBlockEditScreen(blockEntity);
-        Minecraft.getInstance().setScreen(screen);
+        Minecraft.getInstance().gui.setScreen(screen);
         return true;
     }
 
     public static boolean apply(ServerboundSetCommandBlockPacket packet) {
         if (level == null || pos == null || !pos.equals(packet.getPos())
-                || Minecraft.getInstance().screen != screen) {
+                || Minecraft.getInstance().gui.screen() != screen) {
             return false;
         }
 

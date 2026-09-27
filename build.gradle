@@ -1,5 +1,6 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	// Unobfuscated Minecraft (26.x) uses the non-remap loom plugin
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
 	id 'maven-publish'
 }
 
@@ -12,6 +13,9 @@ repositories {
 	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
 	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
 	// for more information about repositories.
+	maven { url = "https://masa.dy.fi/maven/sakura-ryoko"
+		content { includeGroupAndSubgroups("fi.dy.masa") }
+	}
 	maven {url = 'https://maven.fallenbreath.me/releases'
 		content {includeGroupAndSubgroups("me.fallenbreath")}
 	}
@@ -26,14 +30,19 @@ repositories {
 dependencies {
 	// To change the versions see the gradle.properties file
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings loom.officialMojangMappings()
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	// Minecraft 26.x is unobfuscated - no mappings needed
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	// Fabric API modules (versions matching fabric-api 0.161.0+26.2 nested jars)
+	// In the unobfuscated (26.x) loom setup, the outer fabric-api jar contains no
+	// classes - modules must be depended on individually from the Fabric maven.
+	implementation "net.fabricmc.fabric-api:fabric-command-api-v2:3.1.0+00cb03469e"
+	implementation "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.4+29b6eb019e"
+	implementation "net.fabricmc.fabric-api:fabric-networking-api-v1:6.3.4+2989c6a09e"
+	implementation "net.fabricmc.fabric-api:fabric-resource-loader-v1:2.0.13+9edec1269e"
 
-	modImplementation "com.github.sakura-ryoko:malilib:${project.malilib_version}"
-	modImplementation "com.github.sakura-ryoko:litematica:${project.litematica_version}"
+	implementation "fi.dy.masa.malilib:malilib-fabric-${project.minecraft_version}:${project.malilib_version}"
+	implementation "fi.dy.masa.litematica:litematica-fabric-${project.minecraft_version}:${project.litematica_version}"
 }
 
 processResources {
@@ -46,17 +55,19 @@ processResources {
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
+	it.options.release = 25
 }
 
 java {
+	toolchain.languageVersion = JavaLanguageVersion.of(25)
+
 	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
 	// if it is present.
 	// If you remove this line, sources will not be generated.
 	withSourcesJar()
 
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
 }
 
 jar {

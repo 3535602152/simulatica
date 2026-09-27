@@ -13,7 +13,7 @@ import ml.pypals.simulatica.simulation.server.SimulationSelfTest;
 import ml.pypals.simulatica.simulation.server.SimulationCommands;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -30,6 +30,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - ClientCommandManager → ClientCommands（fabric command-api v3 改名）
+ * - 新增 /simulatica absorb [on|off] 与 /simulatica purge 子指令；根指令裸输改为打开控制面板
+ * - DISCONNECT 时停止全部模拟、清理留档并关闭模拟服务器；sendFeedback 放宽为包私有供菜单复用
+ */
 public class SimulaticaClient implements ClientModInitializer {
     public static ToolMode SIMULATE;
     private static final SuggestionProvider<FabricClientCommandSource> PLACEMENT_SUGGESTION = (context, builder) -> {
@@ -79,32 +85,49 @@ public class SimulaticaClient implements ClientModInitializer {
     private void registerShutdown() {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             SimulationManager.getInstance().stopAll();
+            SimulationManager.getInstance().clearLeftovers();
             SimulationServer.shutdown();
         });
     }
     private void registerTickEvent() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-             if (client.level == null || client.isPaused()) return;
-             try {
-                 SimulationManager.getInstance().tick();
-             }catch (Throwable t){
-                 t.printStackTrace(System.err);
-             }
+            // A bare /simulatica asks for the menu; open it once the chat screen has closed.
+            if (menuRequested && client.gui.screen() == null) {
+                menuRequested = false;
+                client.gui.setScreen(new SimulaticaMenuScreen());
+            }
+            if (client.level == null || client.isPaused()) return;
+            try {
+                SimulationManager.getInstance().tick();
+            }catch (Throwable t){
+                t.printStackTrace(System.err);
+            }
         });
+    }
+
+    private static volatile boolean menuRequested;
+
+    /** Schedules the control panel for the next tick, after the chat screen closes. */
+    static void openMenu() {
+        menuRequested = true;
     }
 
     private void registerCommands() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-                dispatcher.register(ClientCommandManager.literal("simulatica")
+                dispatcher.register(ClientCommands.literal("simulatica")
+                        .executes(ctx -> {
+                            openMenu();
+                            return 1;
+                        })
 
-                        .then(ClientCommandManager.literal("start")
+                        .then(ClientCommands.literal("start")
                                 .executes(ctx -> {
                                     ctx.getSource().getPlayer();
                                     startAll();
                                     sendFeedback("Started all schematic simulations.");
                                     return 1;
                                 })
-                                .then(ClientCommandManager.argument("placement_name", StringArgumentType.greedyString())
+                                .then(ClientCommands.argument("placement_name", StringArgumentType.greedyString())
                                         .suggests(PLACEMENT_SUGGESTION)
                                         .executes(ctx -> {
                                             String name = StringArgumentType.getString(ctx, "placement_name");
@@ -112,12 +135,12 @@ public class SimulaticaClient implements ClientModInitializer {
                                             return 1;
                                         }))
                         )
-                        .then(ClientCommandManager.literal("stop")
+                        .then(ClientCommands.literal("stop")
                                 .executes(ctx -> {
                                     SimulationManager.getInstance().stopAll();
                                     sendFeedback("Stopped all simulations.");
                                     return 1;
-                                }).then(ClientCommandManager.argument("placement_name", StringArgumentType.greedyString())
+                                }).then(ClientCommands.argument("placement_name", StringArgumentType.greedyString())
                                         .suggests(PLACEMENT_SUGGESTION)
                                         .executes(ctx -> {
                                             String name = StringArgumentType.getString(ctx, "placement_name");
@@ -125,22 +148,47 @@ public class SimulaticaClient implements ClientModInitializer {
                                             return 1;
                                         }))
                         )
-                        .then(ClientCommandManager.literal("status")
+                        .then(ClientCommands.literal("status")
                                 .executes(ctx -> {
                                     reportStatus();
                                     return 1;
                                 })
                         )
-                        .then(ClientCommandManager.literal("execute")
-                                .then(ClientCommandManager.argument("command", StringArgumentType.greedyString())
+                        .then(ClientCommands.literal("absorb")
+                                .executes(ctx -> {
+                                    reportAbsorption(SimulationManager.getInstance().setItemAbsorption(null));
+                                    return 1;
+                                })
+                                .then(ClientCommands.literal("on")
+                                        .executes(ctx -> {
+                                            reportAbsorption(SimulationManager.getInstance().setItemAbsorption(true));
+                                            return 1;
+                                        }))
+                                .then(ClientCommands.literal("off")
+                                        .executes(ctx -> {
+                                            reportAbsorption(SimulationManager.getInstance().setItemAbsorption(false));
+                                            return 1;
+                                        }))
+                        )
+                        .then(ClientCommands.literal("purge")
+                                .executes(ctx -> {
+                                    int removed = SimulationManager.getInstance().purgeEscapedEntities();
+                                    sendFeedback(removed == 0
+                                            ? "No escaped entities found."
+                                            : "Purged " + removed + " escaped entit" + (removed == 1 ? "y" : "ies") + ".");
+                                    return 1;
+                                })
+                        )
+                        .then(ClientCommands.literal("execute")
+                                .then(ClientCommands.argument("command", StringArgumentType.greedyString())
                                         .suggests((ctx, builder) -> SimulationCommands.suggest(builder))
                                         .executes(ctx -> {
                                             SimulationCommands.execute(StringArgumentType.getString(ctx, "command"));
                                             return 1;
                                         }))
                         )
-                        .then(ClientCommandManager.literal("server")
-                                .then(ClientCommandManager.literal("start")
+                        .then(ClientCommands.literal("server")
+                                .then(ClientCommands.literal("start")
                                         .executes(ctx -> {
                                             try {
                                                 SimulationServer.getOrCreate();
@@ -151,14 +199,14 @@ public class SimulaticaClient implements ClientModInitializer {
                                             }
                                             return 1;
                                         }))
-                                .then(ClientCommandManager.literal("stop")
+                                .then(ClientCommands.literal("stop")
                                         .executes(ctx -> {
                                             SimulationManager.getInstance().stopAll();
                                             SimulationServer.shutdown();
                                             sendFeedback("Simulation server stopped.");
                                             return 1;
                                         }))
-                                .then(ClientCommandManager.literal("selftest")
+                                .then(ClientCommands.literal("selftest")
                                         .executes(ctx -> {
                                             SimulationSelfTest.run().forEach(SimulaticaClient::sendFeedback);
                                             return 1;
@@ -166,6 +214,12 @@ public class SimulaticaClient implements ClientModInitializer {
                         )
                 )
         );
+    }
+
+    private static void reportAbsorption(boolean enabled) {
+        sendFeedback("Item absorption " + (enabled
+                ? "enabled — simulated drops touching you vanish (nothing enters your inventory)."
+                : "disabled."));
     }
 
     private static void reportStatus() {
@@ -234,10 +288,10 @@ public class SimulaticaClient implements ClientModInitializer {
         return result;
     }
 
-    private static void sendFeedback(String message) {
+    static void sendFeedback(String message) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null) {
-            mc.player.displayClientMessage(Component.literal(message), false);
+            mc.player.sendSystemMessage(Component.literal(message));
         } else {
             Simulatica.LOGGER.info(message);
         }

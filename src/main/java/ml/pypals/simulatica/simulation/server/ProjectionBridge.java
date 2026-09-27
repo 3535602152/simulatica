@@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import ml.pypals.simulatica.Simulatica;
 import ml.pypals.simulatica.mixin.SchematicEntityLookupInvoker;
+import ml.pypals.simulatica.mixin.simulation.EntityOmnidirectionalAirMoverInvoker;
 import ml.pypals.simulatica.mixin.simulation.ServerLevelBlockEventsAccessor;
 import ml.pypals.simulatica.mixin.simulation.SimPistonMovingBlockEntityAccessor;
 import ml.pypals.simulatica.mixin.WorldSchematicAccessor;
@@ -19,6 +20,8 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientboundExplodePacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.nbt.CompoundTag;
@@ -28,7 +31,6 @@ import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
-import net.minecraft.world.entity.animal.FlyingAnimal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -41,6 +43,7 @@ import net.minecraft.world.ticks.LevelChunkTicks;
 import net.minecraft.world.ticks.ScheduledTick;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.TagValueOutput;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
@@ -57,6 +60,13 @@ import java.util.Set;
 import java.util.UUID;
 
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - 投影重绘：setBlock 后调用 setBlocksDirty + scheduleChunkRenders(cx, cz, true)（26.2 唯一重绘路径）
+ * - 转发声音包（ClientboundSoundPacket / ClientboundSoundEntityPacket / levelEvent / 爆炸）
+ * - dropItem 出生点钳入区域；clear() 不再丢弃实体
+ * - publishEntities 跨区块换桶：实体位置迁移时先注销再注册，修复击退后渲染消失
+ */
 public final class ProjectionBridge {
 
     private final SimulationLevel level;
@@ -68,6 +78,23 @@ public final class ProjectionBridge {
 
     private final LongSet dirtyRenderChunks = new LongOpenHashSet();
     private final Set<UUID> published = new HashSet<>();
+
+    /** Where each tracked entity was last seen, and whether it was already dying then. */
+    private record SeenEntity(BlockPos pos, boolean dying) {
+    }
+
+    private final java.util.Map<UUID, SeenEntity> lastSeen = new java.util.HashMap<>();
+
+    /**
+     * The chunk each published entity is currently registered under in the projection's
+     * lookup. Litematica's own re-bucketing in {@code addFreshEntity} compares the stored
+     * entity's position with the incoming one's -- but both are the very same object here,
+     * so the comparison is always true and the entity would stay in its original chunk's
+     * bucket forever, vanishing from the per-chunk render enumeration the moment knockback
+     * carries it across a chunk border. We therefore re-bucket ourselves: remove and re-add
+     * whenever the chunk changes.
+     */
+    private final java.util.Map<UUID, Long> publishedChunks = new java.util.HashMap<>();
     private final Set<BlockPos> dirtyBlockEntities = new LinkedHashSet<>();
     private final Set<BlockPos> animated = new LinkedHashSet<>();
     private static final int PROJECTION_FLAGS = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
@@ -246,8 +273,8 @@ public final class ProjectionBridge {
 
         ChunkPos min = source.simChunkMin();
         ChunkPos max = source.simChunkMax();
-        for (int cx = min.x; cx <= max.x; cx++) {
-            for (int cz = min.z; cz <= max.z; cz++) {
+        for (int cx = min.x(); cx <= max.x(); cx++) {
+            for (int cz = min.z(); cz <= max.z(); cz++) {
                 LevelChunk chunk = this.level.getChunk(cx, cz);
 
                 @SuppressWarnings("unchecked")
@@ -307,8 +334,12 @@ public final class ProjectionBridge {
 
             BlockPos sim = this.region.toSim(world);
             BlockState state = this.level.getBlockState(sim);
+            // 26.2 litematica: setBlock ignores flags and never schedules a re-render;
+            // setBlocksDirty is the only path that does (immediate=true)
+            BlockState previous = projection.getBlockState(world);
             projection.setBlock(world, state, PROJECTION_FLAGS);
-            this.dirtyRenderChunks.add(ChunkPos.asLong(cx, cz));
+            projection.setBlocksDirty(world, previous, state);
+            this.dirtyRenderChunks.add(ChunkPos.pack(cx, cz));
             if (state.hasBlockEntity()) {
                 this.dirtyBlockEntities.add(sim);
             }
@@ -328,6 +359,17 @@ public final class ProjectionBridge {
             spawnParticles(client, particles);
         } else if (packet instanceof ClientboundLevelEventPacket event) {
             client.levelEvent(null, event.getType(), event.getPos(), event.getData());
+        } else if (packet instanceof ClientboundSoundPacket sound) {
+            // Regions are mapped with a zero offset, so sim coordinates are world coordinates.
+            client.playLocalSound(sound.getX(), sound.getY(), sound.getZ(), sound.getSound().value(),
+                    sound.getSource(), sound.getVolume(), sound.getPitch(), false);
+        } else if (packet instanceof ClientboundSoundEntityPacket entitySound) {
+            Entity entity = this.level.getEntity(entitySound.getId());
+            if (entity != null) {
+                client.playLocalSound(entity.getX(), entity.getY(), entity.getZ(),
+                        entitySound.getSound().value(), entitySound.getSource(),
+                        entitySound.getVolume(), entitySound.getPitch(), false);
+            }
         } else if (packet instanceof ClientboundExplodePacket explode) {
             client.addParticle(explode.explosionParticle(), true, false,
                     explode.center().x, explode.center().y, explode.center().z, 0.0, 0.0, 0.0);
@@ -345,7 +387,7 @@ public final class ProjectionBridge {
             return;
         }
 
-        RandomSource random = client.random;
+        RandomSource random = client.getRandom();
         for (int i = 0; i < packet.getCount(); i++) {
             client.addParticle(packet.getParticle(), packet.isOverrideLimiter(), false,
                     packet.getX() + random.nextGaussian() * packet.getXDist(),
@@ -357,7 +399,15 @@ public final class ProjectionBridge {
         }
     }
 
-    public int copyIn() {
+    /**
+     * Copies the region's projection contents into the simulation.
+     *
+     * @param preserved UUIDs that must not be duplicated: live leftovers retaken by this
+     *                  bridge and entities the leftover store holds fresher states for.
+     *                  Every UUID copied in is added to the set, so it doubles as the
+     *                  "already present" list for the leftover restore that follows.
+     */
+    public int copyIn(Set<UUID> preserved) {
         WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
         if (projection == null) {
             return 0;
@@ -376,12 +426,15 @@ public final class ProjectionBridge {
             copied++;
         }
 
-        copyEntitiesIn(projection);
+        copyEntitiesIn(projection, preserved);
         return copied;
     }
 
-    private void copyEntitiesIn(WorldSchematic projection) {
+    private void copyEntitiesIn(WorldSchematic projection, Set<UUID> preserved) {
         for (Entity source : projection.getEntities((Entity) null, this.region.simBounds(), e -> true)) {
+            if (preserved.contains(source.getUUID())) {
+                continue;
+            }
             try {
                 TagValueOutput output =
                         TagValueOutput.createWithContext(ProblemReporter.DISCARDING, this.level.registryAccess());
@@ -390,9 +443,12 @@ public final class ProjectionBridge {
                 }
 
                 Entity copy = EntityType.loadEntityRecursive(
-                        output.buildResult(), this.level, EntitySpawnReason.LOAD, entity -> entity);
+                        output.buildResult(), this.level,
+                        new net.minecraft.world.entity.EntitySpawnRequest(EntitySpawnReason.LOAD, false),
+                        entity -> entity);
                 if (copy != null) {
                     this.level.addFreshEntityWithPassengers(copy);
+                    preserved.add(copy.getUUID());
                 }
             } catch (Exception e) {
                 Simulatica.LOGGER.error("[Simulatica] Failed to copy in entity {}: {}",
@@ -406,15 +462,20 @@ public final class ProjectionBridge {
      *
      * <p>Reproduces {@code LivingEntity.createItemStackToDrop} rather than calling
      * {@code Player.drop}, which would build the entity in {@code player.level()} -- the client
-     * world, where the simulation cannot see it.</p>
+     * world, where the simulation cannot see it. The spawn point is clamped just inside the
+     * region: the player throws from outside, and the boundary walls would otherwise catch the
+     * item before it could enter.</p>
      */
     public void dropItem(Player thrower, ItemStack stack) {
         if (stack.isEmpty()) {
             return;
         }
 
-        ItemEntity item = new ItemEntity(this.level,
-                thrower.getX(), thrower.getEyeY() - 0.3, thrower.getZ(), stack);
+        AABB bounds = this.region.simBounds();
+        double x = clampSpawn(thrower.getX(), bounds.minX, bounds.maxX);
+        double y = clampSpawn(thrower.getEyeY() - 0.3, bounds.minY, bounds.maxY);
+        double z = clampSpawn(thrower.getZ(), bounds.minZ, bounds.maxZ);
+        ItemEntity item = new ItemEntity(this.level, x, y, z, stack);
         item.setPickUpDelay(40);
 
         RandomSource random = this.level.getRandom();
@@ -431,6 +492,16 @@ public final class ProjectionBridge {
                 yawCos * pitchCos * 0.3F + Math.sin(spread) * scatter);
 
         this.level.addFreshEntity(item);
+    }
+
+    /** Half a block inside the region, or the region's center line when it is too thin. */
+    private static double clampSpawn(double value, double min, double max) {
+        double lo = min + 0.5;
+        double hi = max - 0.5;
+        if (lo > hi) {
+            return (min + max) / 2.0;
+        }
+        return Mth.clamp(value, lo, hi);
     }
 
     private void copyBlockEntity(WorldSchematic projection, BlockPos world, BlockPos sim, BlockState state) {
@@ -464,8 +535,12 @@ public final class ProjectionBridge {
         }
 
         BlockState state = this.level.getBlockState(sim);
+        // 26.2 litematica: setBlock ignores flags and never schedules a re-render;
+        // setBlocksDirty is the only path that does (immediate=true)
+        BlockState previous = projection.getBlockState(world);
         projection.setBlock(world, state, PROJECTION_FLAGS);
-        this.dirtyRenderChunks.add(ChunkPos.asLong(cx, cz));
+        projection.setBlocksDirty(world, previous, state);
+        this.dirtyRenderChunks.add(ChunkPos.pack(cx, cz));
 
         if (state.hasBlockEntity()) {
             this.dirtyBlockEntities.add(sim);
@@ -610,15 +685,49 @@ public final class ProjectionBridge {
             }
 
             animate(entity);
-            projection.addFreshEntity(entity);
+
+            SchematicEntityLookup<Entity> lookup = ((WorldSchematicAccessor) projection).sim$getEntityLookup();
+            UUID uuid = entity.getUUID();
+            boolean registered = lookup != null && lookup.contains(uuid);
+
+            long chunkKey = ChunkPos.pack(
+                    net.minecraft.util.Mth.floor(entity.getX() / 16.0),
+                    net.minecraft.util.Mth.floor(entity.getZ() / 16.0));
+            Long previousChunk = this.publishedChunks.get(uuid);
+            boolean chunkChanged = previousChunk == null || previousChunk.longValue() != chunkKey;
+
+            // Only touch the projection when something actually changed. Litematica's
+            // addFreshEntitySafe re-rolls the entity's UUID every single call when the schematic
+            // de-duplication option is off (it branches to setUUID(randomUUID()) as soon as the
+            // UUID is already known), which silently destroys entity identity: every tick would
+            // produce a "new" entity, the tracking set would churn, and UUID-keyed state such as
+            // the leftover store would stop matching.
+            if (!registered || chunkChanged) {
+                if (registered) {
+                    unpublish(projection, uuid);
+                }
+                this.publishedChunks.put(uuid, chunkKey);
+                projection.addFreshEntity(entity);
+            }
+
             if (live == null) {
                 live = new HashSet<>();
             }
-            live.add(entity.getUUID());
+            live.add(uuid);
+            this.lastSeen.put(uuid, new SeenEntity(entity.blockPosition(),
+                    entity instanceof LivingEntity living && living.isDeadOrDying()));
         }
 
         for (UUID uuid : this.published) {
             if (live == null || !live.contains(uuid)) {
+                // Dying is expected; vanishing while alive is not -- log where the entity was
+                // last seen so a boundary escape can be pinpointed from the log.
+                SeenEntity seen = this.lastSeen.remove(uuid);
+                if (seen == null || !seen.dying()) {
+                    Simulatica.LOGGER.warn("[Simulatica] Entity {} left '{}' while alive, last seen at {}",
+                            uuid, this.label, seen != null ? seen.pos() : "unknown");
+                }
+                this.publishedChunks.remove(uuid);
                 unpublish(projection, uuid);
             }
         }
@@ -638,17 +747,17 @@ public final class ProjectionBridge {
      */
     private static void animate(Entity entity) {
         if (entity instanceof LivingEntity living) {
-            living.calculateEntityAnimation(living instanceof FlyingAnimal);
+            living.calculateEntityAnimation(
+                    ((EntityOmnidirectionalAirMoverInvoker) living).simulatica$omnidirectionalAirMover());
         }
     }
 
     private static void unpublish(WorldSchematic projection, UUID uuid) {
         SchematicEntityLookup<Entity> lookup = ((WorldSchematicAccessor) projection).sim$getEntityLookup();
         if (lookup != null) {
-            ((SchematicEntityLookupInvoker) lookup).sim$remove(uuid);
+            ((SchematicEntityLookupInvoker) lookup).sim$remove(uuid, projection);
         }
     }
-
 
     private void flushRenders() {
         if (this.dirtyRenderChunks.isEmpty()) {
@@ -657,17 +766,17 @@ public final class ProjectionBridge {
 
         WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
         if (projection != null) {
+            // immediate=true: rebuild right away instead of queuing behind the renderer
             this.dirtyRenderChunks.forEach(
-                    (long key) -> projection.scheduleChunkRenders(ChunkPos.getX(key), ChunkPos.getZ(key)));
+                    (long key) -> projection.scheduleChunkRenders(ChunkPos.getX(key), ChunkPos.getZ(key), true));
         }
         this.dirtyRenderChunks.clear();
     }
 
     void clear() {
-        for (Entity entity : entities()) {
-            entity.discard();
-        }
-
+        // Entities are deliberately NOT discarded or unpublished here: summoned creatures are
+        // part of the simulated end state and stay visible in the projection, the same way the
+        // simulated blocks do. SimulationManager takes over their republishing from now on.
         BlockState air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
         for (BlockPos world : BlockPos.betweenClosed(this.region.worldMin(), this.region.worldMax())) {
             BlockPos sim = this.region.toSim(world);
@@ -677,14 +786,19 @@ public final class ProjectionBridge {
         }
         refreshBoundary(this.region, this.region);
 
-        WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
-        if (projection != null) {
-            this.published.forEach(uuid -> unpublish(projection, uuid));
-        }
         this.published.clear();
+        this.publishedChunks.clear();
         this.dirtyBlockEntities.clear();
         this.animated.clear();
         Simulatica.LOGGER.info("[Simulatica] Detached '{}' from the simulation", this.label);
+    }
+
+    /** Removes one entity from the projection's lookup, wherever it came from. */
+    public static void unpublishEntity(WorldSchematic projection, Entity entity) {
+        SchematicEntityLookup<Entity> lookup = ((WorldSchematicAccessor) projection).sim$getEntityLookup();
+        if (lookup != null) {
+            ((SchematicEntityLookupInvoker) lookup).sim$remove(entity.getUUID(), projection);
+        }
     }
 
     @Nullable

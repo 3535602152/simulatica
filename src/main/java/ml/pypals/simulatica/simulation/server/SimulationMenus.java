@@ -3,7 +3,6 @@ package ml.pypals.simulatica.simulation.server;
 import ml.pypals.simulatica.Simulatica;
 import ml.pypals.simulatica.mixin.simulation.MenuScreensAccessor;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.MenuScreens;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
@@ -16,6 +15,12 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import org.jetbrains.annotations.Nullable;
 
+import java.lang.reflect.Method;
+
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - 26.2 容器菜单与屏幕适配（配合 MenuScreensAccessor 反射创建）
+ */
 /**
  * Opens a simulated block's container GUI on the client.
  *
@@ -84,7 +89,7 @@ public final class SimulationMenus {
             snapshot = copyOf(player.getInventory());
             open = menu;
             player.containerMenu = menu;
-            Minecraft.getInstance().setScreen(screen);
+            Minecraft.getInstance().gui.setScreen(screen);
             return true;
         } catch (Exception e) {
             Simulatica.LOGGER.error("[Simulatica] Failed to open a simulated container", e);
@@ -102,11 +107,34 @@ public final class SimulationMenus {
             return null;
         }
 
-        MenuScreens.ScreenConstructor<AbstractContainerMenu, ?> constructor =
-                (MenuScreens.ScreenConstructor<AbstractContainerMenu, ?>)
-                        MenuScreensAccessor.simulatica$screens().get(type);
-        return constructor == null ? null : (Screen) constructor.create(menu, inventory, title);
+        Object constructor = MenuScreensAccessor.simulatica$screens().get(type);
+        if (constructor == null) {
+            return null;
+        }
+        try {
+            return (Screen) screenConstructorCreate().invoke(constructor, menu, inventory, title);
+        } catch (ReflectiveOperationException e) {
+            Simulatica.LOGGER.error("[Simulatica] Failed to create a menu screen for {}", type, e);
+            return null;
+        }
     }
+
+    // MenuScreens.ScreenConstructor is private in 26.x; resolve its create() once reflectively.
+    private static Method screenConstructorCreate() {
+        if (screenConstructorCreate == null) {
+            try {
+                Class<?> iface = Class.forName("net.minecraft.client.gui.screens.MenuScreens$ScreenConstructor");
+                Method m = iface.getMethod("create", AbstractContainerMenu.class, Inventory.class, Component.class);
+                m.setAccessible(true);
+                screenConstructorCreate = m;
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+        return screenConstructorCreate;
+    }
+
+    private static Method screenConstructorCreate;
 
     public static void close() {
         AbstractContainerMenu menu = open;

@@ -2,5 +2,6 @@
   "litematica.tool_mode.name.simulate": "Simulate Interaction",
   "simulatica.message.placement_not_simulated": "Placement '%s' is not being simulated — run /simulatica start",
   "simulatica.message.no_simulation": "Nothing is being simulated here — run /simulatica start",
-  "simulatica.message.no_schematic": "Placement '%s' has no schematic loaded"
+  "simulatica.message.no_schematic": "Placement '%s' has no schematic loaded",
+  "simulatica.message.outside_bounds": "Cannot place here: outside the simulated region"
 }

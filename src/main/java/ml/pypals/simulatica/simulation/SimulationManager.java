@@ -11,25 +11,42 @@ import fi.dy.masa.malilib.util.InfoUtils;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.simulation.server.LeftoverStore;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
 import net.minecraft.client.Minecraft;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.BlockPos;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.ExperienceOrb;
+import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.phys.AABB;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - 模拟停止后生物留存：leftovers 列表 + 区块重建后重发 + 再次启动时由新桥接管（原实体不动，只交接 UUID）
+ * - stopSimulation 调用 LeftoverStore 存盘；attach 传入 preserved UUID 防重复复制
+ * - 新增掉落物吸收 absorbItems()（含经验球与箭矢，含创造模式射出的 CREATIVE_ONLY 箭矢）与越界实体清理 purgeEscapedEntities()
+ */
 public class SimulationManager {
 
     /** Ticks a changed placement must hold still before it is even considered, so a drag does not thrash. */
@@ -41,9 +58,58 @@ public class SimulationManager {
     private static final SimulationManager INSTANCE = new SimulationManager();
     private final Map<SchematicPlacement, Simulation> active = new LinkedHashMap<>();
 
+    private boolean itemAbsorption;
+
+    /**
+     * Entities left behind when a simulation stops. They keep their last simulated state and
+     * stay visible in the projection until the region is simulated again or the world closes.
+     */
+    private final List<LeftoverEntities> leftovers = new ArrayList<>();
+
+    private record LeftoverEntities(String label, AABB bounds, List<Entity> entities) {
+    }
+
     private SimulationManager() {}
 
     public static SimulationManager getInstance() { return INSTANCE; }
+
+    /**
+     * The item-absorption toggle: when on, simulated item entities touching the player vanish
+     * from the simulation without entering the inventory.
+     */
+    public boolean setItemAbsorption(@Nullable Boolean enabled) {
+        this.itemAbsorption = enabled != null ? enabled : !this.itemAbsorption;
+        return this.itemAbsorption;
+    }
+
+    public boolean isItemAbsorption() {
+        return this.itemAbsorption;
+    }
+
+    /**
+     * Discards every simulated entity that ended up outside its region's bounds.
+     *
+     * <p>The boundary walls make escapes physically impossible through movement, but teleports
+     * (chorus fruit, endermen) and entities left over from before the walls existed can still
+     * sit outside, invisible in the projection and falling through the void. Returns the number
+     * removed.</p>
+     */
+    public int purgeEscapedEntities() {
+        int removed = 0;
+        for (ProjectionBridge bridge : getAllSimulations()) {
+            AABB bounds = bridge.region().simBounds();
+            for (Entity entity : bridge.entities()) {
+                if (entity instanceof EnderDragonPart) {
+                    continue;
+                }
+                if (!bounds.contains(entity.getBoundingBox().getCenter())) {
+                    entity.discard();
+                    removed++;
+                }
+            }
+        }
+        return removed;
+    }
 
     /** Ticks between "cannot move there" notices, so holding an arrow key does not spam. */
     private static final int BLOCKED_NOTICE_TICKS = 40;
@@ -106,9 +172,93 @@ public class SimulationManager {
 
         followPlacements(server);
         server.tickSimulation();
+        if (this.itemAbsorption) {
+            absorbItems();
+        }
+    }
+
+    /**
+     * Removes simulated drops that touch the player, the way vanilla pickup would collect them --
+     * except nothing reaches the inventory and no experience is granted, so a simulation never
+     * leaks into the real save. Items with an active pickup delay are left alone so machines can
+     * still take them.
+     *
+     * <p>Experience orbs and arrows are drops too, and being unable to clear them left orbs and
+     * spent arrows piling up on the boundary floor. Both are removed like items: their value and
+     * their stack belong to the simulation, not to the player. Arrows still shaking from a fresh
+     * shot are skipped, matching vanilla {@code playerTouch}.</p>
+     */
+    private void absorbItems() {
+        Minecraft client = Minecraft.getInstance();
+        if (client.player == null || client.level == null) {
+            return;
+        }
+
+        AABB reach = client.player.getBoundingBox().inflate(1.0, 0.5, 1.0);
+        boolean pickedItem = false;
+        boolean pickedExperience = false;
+
+        // Queried on the simulation levels rather than through a bridge's tracked set: that set is
+        // clipped to the region box, so a drop resting on the boundary fell outside it and was
+        // never absorbed.
+        for (ProjectionBridge bridge : getAllSimulations()) {
+            for (Entity entity : bridge.level().getEntitiesOfClass(Entity.class, reach,
+                    candidate -> !candidate.isRemoved() && !(candidate instanceof Player))) {
+                if (entity instanceof ItemEntity item) {
+                    if (item.hasPickUpDelay()) {
+                        continue;
+                    }
+                    item.discard();
+                    pickedItem = true;
+                } else if (entity instanceof ExperienceOrb orb) {
+                    orb.discard();
+                    pickedExperience = true;
+                } else if (entity instanceof AbstractArrow arrow) {
+                    // 26.2 exposes the pickup rule as a public field; getPickupItem() is protected.
+                    // Arrows the player shot in creative count too: creative sets CREATIVE_ONLY,
+                    // and a filter for ALLOWED alone left every player-shot arrow stuck in the
+                    // machine forever. Their item still goes to nobody, as with the other drops.
+                    if (arrow.shakeTime > 0) {
+                        continue;
+                    }
+                    if (arrow.pickup != AbstractArrow.Pickup.ALLOWED
+                            && arrow.pickup != AbstractArrow.Pickup.CREATIVE_ONLY) {
+                        continue;
+                    }
+                    arrow.discard();
+                    pickedItem = true;
+                }
+            }
+        }
+
+        if (pickedItem) {
+            float pitch = (client.level.getRandom().nextFloat() - client.level.getRandom().nextFloat()) * 0.7F + 1.0F;
+            client.level.playLocalSound(client.player.getX(), client.player.getY(), client.player.getZ(),
+                    SoundEvents.ITEM_PICKUP, SoundSource.PLAYERS, 0.2F, pitch * 2.0F, false);
+        }
+        if (pickedExperience) {
+            float pitch = (client.level.getRandom().nextFloat() - client.level.getRandom().nextFloat()) * 0.7F + 1.0F;
+            client.level.playLocalSound(client.player.getX(), client.player.getY(), client.player.getZ(),
+                    SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.PLAYERS, 0.1F, pitch * 2.0F, false);
+        }
     }
 
     private void followPlacements(SimulationServer server) {
+        // Drop placements that were deleted in Litematica's UI and reloaded under the same name.
+        // Litematica creates a fresh SchematicPlacement object on reload, so the old one is no
+        // longer in its list -- but its bridge still occupies the region here, and the new
+        // placement's attach then fails with "Region overlaps the already-simulated ...". Detach
+        // the orphan before the new placement is attached below.
+        List<SchematicPlacement> loaded = DataManager.getSchematicPlacementManager().getAllSchematicsPlacements();
+        Iterator<Map.Entry<SchematicPlacement, Simulation>> iterator = active.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<SchematicPlacement, Simulation> entry = iterator.next();
+            if (!loaded.contains(entry.getKey())) {
+                detachSimulation(entry.getValue(), server);
+                iterator.remove();
+            }
+        }
+
         for (Map.Entry<SchematicPlacement, Simulation> entry : active.entrySet()) {
             SchematicPlacement placement = entry.getKey();
             Simulation simulation = entry.getValue();
@@ -222,7 +372,7 @@ public class SimulationManager {
         for (RegionBox box : boxes.values()) {
             for (int cx = box.min().getX() >> 4; cx <= box.max().getX() >> 4; cx++) {
                 for (int cz = box.min().getZ() >> 4; cz <= box.max().getZ() >> 4; cz++) {
-                    into.add(ChunkPos.asLong(cx, cz));
+                    into.add(ChunkPos.pack(cx, cz));
                 }
             }
         }
@@ -232,7 +382,7 @@ public class SimulationManager {
         for (RegionBox box : boxes.values()) {
             for (int cx = box.min().getX() >> 4; cx <= box.max().getX() >> 4; cx++) {
                 for (int cz = box.min().getZ() >> 4; cz <= box.max().getZ() >> 4; cz++) {
-                    if (chunks.contains(ChunkPos.asLong(cx, cz))) {
+                    if (chunks.contains(ChunkPos.pack(cx, cz))) {
                         return true;
                     }
                 }
@@ -287,9 +437,8 @@ public class SimulationManager {
             return;
         }
         simulation.blockedNotice = BLOCKED_NOTICE_TICKS;
-        Minecraft.getInstance().player.displayClientMessage(
-                Component.literal("'" + placement.getName() + "' cannot overlap another running simulation"),
-                true);
+        Minecraft.getInstance().player.sendOverlayMessage(
+                Component.literal("'" + placement.getName() + "' cannot overlap another running simulation"));
     }
 
     @Nullable
@@ -336,7 +485,8 @@ public class SimulationManager {
                 simulation.bridges.put(entry.getKey(), server.attach(
                         Minecraft.getInstance().level.dimension(),
                         box.min(), box.max(),
-                        placement.getName() + "/" + entry.getKey()));
+                        placement.getName() + "/" + entry.getKey(),
+                        preserveLeftoversIntersecting(box)));
             } catch (Exception e) {
                 Simulatica.LOGGER.error("[Simulatica] Failed to simulate region '{}': {}",
                         entry.getKey(), e.getMessage(), e);
@@ -363,7 +513,7 @@ public class SimulationManager {
         Target fallback = null;
         for (SchematicPlacementManager.PlacementPart part :
                 DataManager.getSchematicPlacementManager().getAllPlacementsTouchingChunk(pos)) {
-            if (!part.getBox().containsPos(pos)) continue;
+            if (!part.getBox().contains(pos)) continue;
 
             SchematicPlacement placement = part.getPlacement();
             String regionName = part.getSubRegionName();
@@ -381,6 +531,17 @@ public class SimulationManager {
         SimulationServer server = SimulationServer.getRunning();
         if (server != null) {
             server.republishEntities();
+        }
+
+        // Litematica drops a chunk's entities on every rebuild; leftovers have no bridge left
+        // to hand them back, so the manager does it for them.
+        if (!this.leftovers.isEmpty()) {
+            WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
+            if (projection != null) {
+                for (LeftoverEntities leftover : this.leftovers) {
+                    leftover.entities().forEach(projection::addFreshEntity);
+                }
+            }
         }
     }
 
@@ -427,10 +588,80 @@ public class SimulationManager {
 
         SimulationServer server = SimulationServer.getRunning();
         if (server != null) {
-            simulation.bridges.values().forEach(server::detach);
+            detachSimulation(simulation, server);
         }
         Simulatica.LOGGER.info("[Simulatica] Stopped all simulations for placement '{}'",
                 placement.getName());
+    }
+
+    /**
+     * Detaches every bridge of a simulation, keeping its live entities as leftovers the way
+     * {@link #stopSimulation} does. Shared by the explicit stop path and the orphan-cleanup path
+     * in {@link #followPlacements}.
+     */
+    private void detachSimulation(Simulation simulation, SimulationServer server) {
+        for (ProjectionBridge bridge : simulation.bridges.values()) {
+            List<Entity> kept = new ArrayList<>();
+            for (Entity entity : bridge.entities()) {
+                if (!entity.isRemoved() && !(entity instanceof EnderDragonPart)) {
+                    kept.add(entity);
+                }
+            }
+            if (!kept.isEmpty()) {
+                LeftoverStore.save(bridge.label(), kept, bridge.level());
+                this.leftovers.add(new LeftoverEntities(bridge.label(), bridge.region().simBounds(), kept));
+            }
+            server.detach(bridge);
+        }
+    }
+
+    /**
+     * Drops every leftover without keeping it (used when the world/connection closes).
+     *
+     * <p>Note {@link #stopAll} runs first on disconnect, and it has already written every
+     * leftover to the store -- the entities themselves only live in the scratch world,
+     * which is deleted on shutdown.</p>
+     */
+    public void clearLeftovers() {
+        for (LeftoverEntities leftover : this.leftovers) {
+            leftover.entities().forEach(Entity::discard);
+        }
+        this.leftovers.clear();
+    }
+
+    /**
+     * Hands leftovers intersecting a region that is about to be attached again over to the
+     * new bridge.
+     *
+     * <p>The entities themselves are untouched: they were never discarded when their bridge
+     * detached, so the new bridge's tracking simply picks them up again (same coordinates,
+     * zero offset). Only the bookkeeping entry goes away. Their UUIDs are returned so the
+     * attach can keep the projection's copies of them from being duplicated into the
+     * simulation -- the live originals are the newer state.</p>
+     */
+    private java.util.Set<java.util.UUID> preserveLeftoversIntersecting(RegionBox box) {
+        java.util.Set<java.util.UUID> preserved = new java.util.HashSet<>();
+        if (this.leftovers.isEmpty()) {
+            return preserved;
+        }
+        this.leftovers.removeIf(leftover -> {
+            if (!intersects(leftover.bounds(), box)) {
+                return false;
+            }
+            for (Entity entity : leftover.entities()) {
+                if (!entity.isRemoved()) {
+                    preserved.add(entity.getUUID());
+                }
+            }
+            return true;
+        });
+        return preserved;
+    }
+
+    private static boolean intersects(AABB bounds, RegionBox box) {
+        return bounds.minX <= box.max().getX() + 1 && bounds.maxX >= box.min().getX()
+                && bounds.minZ <= box.max().getZ() + 1 && bounds.maxZ >= box.min().getZ()
+                && bounds.minY <= box.max().getY() + 1 && bounds.maxY >= box.min().getY();
     }
 
     public void stopAll() {

@@ -22,6 +22,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - malilib IntBoundingBox.containsPos → contains
+ */
 @Mixin(Item.class)
 public class ItemMixin {
     @WrapMethod(method = "getPlayerPOVHitResult")
@@ -36,7 +40,7 @@ public class ItemMixin {
 
                 List<SchematicPlacementManager.PlacementPart> list = DataManager.getSchematicPlacementManager().getAllPlacementsTouchingChunk(hitResult.getBlockPos());
                 for (SchematicPlacementManager.PlacementPart part : list) {
-                    if (part.getBox().containsPos(hitResult.getBlockPos())) {
+                    if (part.getBox().contains(hitResult.getBlockPos())) {
                         SchematicPlacement placement = part.getPlacement();
                         String regionName = part.getSubRegionName();
                         Map<String, ProjectionBridge> sims = SimulationManager.getInstance().getSimulations(placement);

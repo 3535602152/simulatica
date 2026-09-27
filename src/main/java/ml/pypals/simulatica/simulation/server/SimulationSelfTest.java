@@ -21,6 +21,10 @@ import java.util.function.Consumer;
 import org.jetbrains.annotations.Nullable;
 
 /**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - ChunkPos.asLong → ChunkPos.pack（26.2 record 化）
+ */
+/**
  * Check that the simulation server actually simulates.
  */
 public final class SimulationSelfTest {
@@ -83,7 +87,7 @@ public final class SimulationSelfTest {
             }
         }
 
-        long key = ChunkPos.asLong(cx, cz);
+        long key = ChunkPos.pack(cx, cz);
         int ticks = 0;
         while (ticks < 200 && !(level.areEntitiesLoaded(key) && level.getChunkSource().isPositionTicking(key))) {
             server.tickSimulation();
@@ -132,7 +136,7 @@ public final class SimulationSelfTest {
             results.add("PASS gravity: sand fell " + (spawn.getY() - floor.getY() - 1)
                     + " blocks and landed, moved=" + moved + " rendered=" + rendered);
         } else {
-            long chunkKey = ChunkPos.asLong(spawn);
+            long chunkKey = ChunkPos.pack(spawn);
             results.add("FAIL gravity: scheduledOnPlace=" + scheduledOnPlace
                     + " becameEntity=" + becameEntity
                     + " moved=" + moved

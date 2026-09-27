@@ -21,6 +21,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * [SIMULATICA-修改] 与原版模组（1.21.11）的差异：
+ * - Player.displayClientMessage → sendSystemMessage
+ */
 public final class SimulationCommands {
 
     private SimulationCommands() {}
@@ -121,7 +125,7 @@ public final class SimulationCommands {
 
     private static void feedback(LocalPlayer player, Component message) {
         if (player != null) {
-            player.displayClientMessage(message, false);
+            player.sendSystemMessage(message);
         }
     }
 }
