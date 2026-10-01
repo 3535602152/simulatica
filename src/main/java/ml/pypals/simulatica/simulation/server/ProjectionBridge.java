@@ -613,12 +613,9 @@ public final class ProjectionBridge {
         if (source instanceof PistonMovingBlockEntity && target instanceof PistonMovingBlockEntity) {
             ((SimPistonMovingBlockEntityAccessor) target).sim$setProgressO(
                     ((SimPistonMovingBlockEntityAccessor) source).sim$getProgressO());
+            ((SimPistonMovingBlockEntityAccessor) target).sim$setProgress(
+                    ((SimPistonMovingBlockEntityAccessor) source).sim$getProgress());
         }
-    }
-
-    private static boolean isFinishedPiston(BlockEntity target) {
-        return target instanceof PistonMovingBlockEntity
-                && ((SimPistonMovingBlockEntityAccessor) target).sim$getProgress() >= 1.0F;
     }
 
     private void tickProjectionBlockEntities() {
@@ -642,7 +639,8 @@ public final class ProjectionBridge {
             }
 
             BlockState state = target.getBlockState();
-            if (!(state.getBlock() instanceof EntityBlock entityBlock) || isFinishedPiston(target)) {
+            // Piston progress comes from the simulation; a second tick would advance it twice.
+            if (!(state.getBlock() instanceof EntityBlock entityBlock) || target instanceof PistonMovingBlockEntity) {
                 continue;
             }
 
@@ -663,6 +661,12 @@ public final class ProjectionBridge {
     }
 
     void syncToProjection() {
+        for (BlockPos world : this.animated) {
+            BlockPos sim = this.region.toSim(world);
+            if (this.level.getBlockEntity(sim) instanceof PistonMovingBlockEntity) {
+                this.dirtyBlockEntities.add(sim);
+            }
+        }
         flushBlockEntities();
         tickProjectionBlockEntities();
         publishEntities();
