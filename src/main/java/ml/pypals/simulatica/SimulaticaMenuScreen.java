@@ -7,6 +7,7 @@ import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.carpet.CarpetIntegration;
+import ml.pypals.simulatica.counter.HopperCounter;
 import ml.pypals.simulatica.simulation.SimulationManager;
 import ml.pypals.simulatica.simulation.server.SimulationCommands;
 import ml.pypals.simulatica.simulation.server.SimulationSelfTest;
@@ -127,6 +128,21 @@ public final class SimulaticaMenuScreen extends Screen {
         this.leftNextY += ROW_HEIGHT;
         addLeftButton("运行自检诊断", this.leftNextY, LEFT_WIDTH,
                 b -> SimulationSelfTest.run().forEach(SimulaticaClient::sendFeedback));
+        this.leftNextY += ROW_HEIGHT;
+
+        // 漏斗计数器
+        this.leftNextY += 8;
+        this.leftHeaders.add(new Header("漏斗计数器", this.leftNextY));
+        addLeftButton("查看计数", this.leftNextY, LEFT_WIDTH, b -> {
+            for (Component line : HopperCounter.formatAll()) {
+                SimulaticaClient.sendFeedback(line.getString());
+            }
+        });
+        this.leftNextY += ROW_HEIGHT;
+        addLeftButton("重置计数", this.leftNextY, LEFT_WIDTH, b -> {
+            HopperCounter.resetAll();
+            SimulaticaClient.sendFeedback("已重置所有漏斗计数器。");
+        });
         this.leftNextY += ROW_HEIGHT;
 
         // 世界调整（折叠）

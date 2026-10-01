@@ -22,6 +22,7 @@
     "patch.ItemMixin",
     "simulation.EntityOmnidirectionalAirMoverInvoker",
     "simulation.ChunkMapUpdatePlayerStatusInvoker",
+    "simulation.HopperBlockEntityCounterMixin",
     "simulation.LivingEntityDeathSoundInvoker",
     "simulation.LivingEntityAttackStrengthAccessor",
     "simulation.LivingEntityTickInvoker",
