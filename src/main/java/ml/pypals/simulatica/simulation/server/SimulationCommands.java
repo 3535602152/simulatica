@@ -91,7 +91,7 @@ public final class SimulationCommands {
                 sink(player),
                 player.position(),
                 new Vec2(player.getXRot(), player.getYRot()),
-                server.levelFor(level.dimension()),
+                ml.pypals.simulatica.simulation.SimulationManager.getInstance().commandLevel(),
                 LevelBasedPermissionSet.OWNER,
                 name.getString(),
                 name,
