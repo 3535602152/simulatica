@@ -2,12 +2,12 @@ package ml.pypals.simulatica.simulation;
 
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationLevel;
+import ml.pypals.simulatica.simulation.server.SimulationViewer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -61,7 +61,7 @@ public final class SimulationRaycast {
         for (ProjectionBridge bridge : SimulationManager.getInstance().getAllSimulations()) {
             for (Entity entity : bridge.level().getEntitiesOfClass(Entity.class, swept,
                     candidate -> !candidate.isRemoved() && candidate.isPickable()
-                            && !(candidate instanceof Player))) {
+                            && !SimulationViewer.isViewer(candidate))) {
                 AABB box = entity.getBoundingBox().inflate(entity.getPickRadius());
                 Optional<Vec3> clip = box.clip(eye, end);
                 if (clip.isEmpty()) {

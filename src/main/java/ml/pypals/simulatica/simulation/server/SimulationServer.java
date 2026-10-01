@@ -32,6 +32,7 @@ import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.server.players.NameAndId;
 import net.minecraft.util.Util;
 import net.minecraft.util.debugchart.LocalSampleLogger;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
@@ -146,9 +147,44 @@ public final class SimulationServer extends MinecraftServer {
         }
 
         instance = server;
+        fixCarpetSpawnTries();
         Simulatica.LOGGER.info("[Simulatica] Simulation server started with dimensions {}",
                 server.levelKeys().stream().map(k -> k.identifier().toString()).toList());
         return server;
+    }
+
+    /**
+     * Carpet's {@code SpawnReporter.spawn_tries} is only populated by
+     * {@code CarpetServer.onServerLoaded}, which never runs on a client in multiplayer. Its
+     * {@code NaturalSpawnerMixin.spawnMultipleTimes} redirect reads that map without a null check,
+     * so the moment the simulation's natural-spawning phase runs it throws an NPE that unwinds out
+     * of {@code ServerLevel.tick} every tick -- silently killing entity ticking, block-entity
+     * ticking and block events. Populating the map here restores the full tick on multiplayer.
+     */
+    private static void fixCarpetSpawnTries() {
+        if (!FabricLoader.getInstance().isModLoaded("carpet")) {
+            return;
+        }
+        try {
+            Object raw = Class.forName("carpet.utils.SpawnReporter").getField("spawn_tries").get(null);
+            if (!(raw instanceof Map<?, ?>)) {
+                return;
+            }
+            @SuppressWarnings("unchecked")
+            Map<MobCategory, Integer> tries = (Map<MobCategory, Integer>) raw;
+            if (!tries.isEmpty()) {
+                return;
+            }
+            for (MobCategory category : MobCategory.values()) {
+                tries.put(category, 1);
+            }
+            Simulatica.LOGGER.info("[Simulatica] Populated carpet spawn_tries for {} mob categories",
+                    tries.size());
+        } catch (ClassNotFoundException e) {
+            // Carpet present but not on this classpath; nothing to do.
+        } catch (Exception e) {
+            Simulatica.LOGGER.warn("[Simulatica] Failed to populate carpet spawn_tries: {}", e.toString());
+        }
     }
 
     public static void shutdown() {

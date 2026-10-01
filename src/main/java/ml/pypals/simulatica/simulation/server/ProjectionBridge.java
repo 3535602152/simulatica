@@ -7,6 +7,7 @@ import fi.dy.masa.litematica.world.WorldSchematic;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.mixin.SchematicEntityLookupInvoker;
 import ml.pypals.simulatica.mixin.simulation.EntityOmnidirectionalAirMoverInvoker;
 import ml.pypals.simulatica.mixin.simulation.ServerLevelBlockEventsAccessor;
@@ -33,6 +34,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntityTicker;
@@ -426,6 +428,10 @@ public final class ProjectionBridge {
             copied++;
         }
 
+        // 铺方块时 LevelChunk.setBlockState 会对光照属性变化的方块同步 checkBlock（26.2 无需
+        // UPDATE_LIGHT flag），露天 skylight/火把 blockLight 的取值已正确，刷怪判定读得到。手动
+        // runLightUpdates 反而会在渲染线程撞上 ThreadedLevelLightEngine 的线程守卫。
+
         copyEntitiesIn(projection, preserved);
         return copied;
     }
@@ -749,6 +755,10 @@ public final class ProjectionBridge {
         if (entity instanceof LivingEntity living) {
             living.calculateEntityAnimation(
                     ((EntityOmnidirectionalAirMoverInvoker) living).simulatica$omnidirectionalAirMover());
+        }
+        // 假人（ServerPlayer）的渲染镜像（ClientMannequin）跟随其位置/朝向，让皮肤正确显示
+        if (entity instanceof ServerPlayer player) {
+            BotManager.syncAvatar(player);
         }
     }
 

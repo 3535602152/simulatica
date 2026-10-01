@@ -11,6 +11,7 @@ import fi.dy.masa.malilib.util.InfoUtils;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.simulation.server.LeftoverStore;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
@@ -586,6 +587,10 @@ public class SimulationManager {
             return;
         }
 
+        // Fake players are simulation-owned and must not linger in the scratch world once the
+        // placement stops simulating.
+        BotManager.removeAll(placement);
+
         SimulationServer server = SimulationServer.getRunning();
         if (server != null) {
             detachSimulation(simulation, server);
@@ -603,7 +608,10 @@ public class SimulationManager {
         for (ProjectionBridge bridge : simulation.bridges.values()) {
             List<Entity> kept = new ArrayList<>();
             for (Entity entity : bridge.entities()) {
-                if (!entity.isRemoved() && !(entity instanceof EnderDragonPart)) {
+                // Players (fake bots) are reclaimed separately and never stored as leftovers:
+                // they cannot round-trip through the generic entity NBT loader.
+                if (!entity.isRemoved() && !(entity instanceof EnderDragonPart)
+                        && !(entity instanceof Player)) {
                     kept.add(entity);
                 }
             }

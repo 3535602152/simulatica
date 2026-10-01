@@ -17,6 +17,7 @@ import net.minecraft.world.entity.LivingEntity;
 import ml.pypals.simulatica.mixin.simulation.LivingEntityDeathSoundInvoker;
 import net.minecraft.world.level.CustomSpawner;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.dimension.LevelStem;
@@ -164,6 +165,18 @@ public class SimulationLevel extends ServerLevel {
     public @NonNull TickRateManager tickRateManager() {
         ClientLevel client = Minecraft.getInstance().level;
         return client != null ? client.tickRateManager() : super.tickRateManager();
+    }
+
+    /**
+     * The simulation's flat generator gives every chunk {@code THE_VOID} biome, whose mob spawn
+     * settings are empty -- natural spawning would always come up empty. Delegate to the real
+     * client world instead (sim coordinates equal world coordinates, the region offset is always
+     * zero), so a swamp farm spawns swamp mobs, a plains machine spawns plains mobs, and so on.
+     */
+    @Override
+    public @NonNull Holder<Biome> getBiome(@NonNull BlockPos pos) {
+        ClientLevel client = Minecraft.getInstance().level;
+        return client != null ? client.getBiome(pos) : super.getBiome(pos);
     }
 
     /**

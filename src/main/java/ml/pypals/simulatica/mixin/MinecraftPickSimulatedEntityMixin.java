@@ -47,7 +47,7 @@ public class MinecraftPickSimulatedEntityMixin {
         }
 
         ItemStack egg = hit.entity().getPickResult();
-        if (egg.isEmpty()) {
+        if (egg == null || egg.isEmpty()) {
             return;
         }
 

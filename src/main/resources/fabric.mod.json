@@ -2,8 +2,8 @@
 	"schemaVersion": 1,
 	"id": "simulatica",
 	"version": "${version}",
-	"name": "simulatica",
-	"description": "Simulate minecraft inside Litematica!",
+	"name": "投影模拟-新视界 Simulatica: New Horizon",
+	"description": "在 Litematica 投影内模拟 Minecraft——Simulatica 的 26.2 二改版（假人、模拟刷怪、投影交互等增强）。Simulate Minecraft inside Litematica (Simulatica fork for MC 26.2).",
 	"authors": [
 		"Ryan100C"
 	],

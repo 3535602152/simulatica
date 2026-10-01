@@ -86,6 +86,7 @@ public class SimulaticaClient implements ClientModInitializer {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             SimulationManager.getInstance().stopAll();
             SimulationManager.getInstance().clearLeftovers();
+            ml.pypals.simulatica.carpet.BotManager.clearAll();
             SimulationServer.shutdown();
         });
     }
@@ -99,10 +100,25 @@ public class SimulaticaClient implements ClientModInitializer {
             if (client.level == null || client.isPaused()) return;
             try {
                 SimulationManager.getInstance().tick();
-            }catch (Throwable t){
-                t.printStackTrace(System.err);
+            } catch (Throwable t) {
+                reportTickException(t);
             }
         });
+    }
+
+    /** Same exception class+message is only reported once every 30s, so a per-tick fault cannot spam the log. */
+    private long lastErrorReportNanos = 0L;
+    private String lastErrorSignature = null;
+
+    private void reportTickException(Throwable t) {
+        String signature = t.getClass().getName() + ": " + t.getMessage();
+        long now = System.nanoTime();
+        if (signature.equals(lastErrorSignature) && now - lastErrorReportNanos < 30_000_000_000L) {
+            return;
+        }
+        lastErrorReportNanos = now;
+        lastErrorSignature = signature;
+        Simulatica.LOGGER.error("[Simulatica] Simulation tick failed: {}", signature, t);
     }
 
     private static volatile boolean menuRequested;

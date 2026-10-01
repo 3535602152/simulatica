@@ -7,6 +7,7 @@
     "ClientPacketSendMixin",
     "FishingHookRetrieveMixin",
     "InputHandlerMixin",
+    "LitematicaMainMenuMixin",
     "LocalPlayerContainerMixin",
     "LocalPlayerDropMixin",
     "MinecraftPickSimulatedEntityMixin",
@@ -20,15 +21,21 @@
     "WorldSchematicEntityMixin",
     "patch.ItemMixin",
     "simulation.EntityOmnidirectionalAirMoverInvoker",
+    "simulation.ChunkMapUpdatePlayerStatusInvoker",
     "simulation.LivingEntityDeathSoundInvoker",
+    "simulation.LivingEntityAttackStrengthAccessor",
+    "simulation.LivingEntityTickInvoker",
     "simulation.MenuScreensAccessor",
     "simulation.MinecraftServerLevelsAccessor",
     "simulation.MinecraftServerTickAccessor",
     "simulation.MobCrossLevelTargetMixin",
+    "simulation.NaturalSpawnerLimitMixin",
     "simulation.PlayerAttackMixin",
     "simulation.PlayerListPlayersAccessor",
     "simulation.ServerLevelBlockEventsAccessor",
     "simulation.ServerLevelEntityManagerAccessor",
+    "simulation.ServerLevelPlayersAccessor",
+    "simulation.SimBotTickMixin",
     "simulation.SimPistonMovingBlockEntityAccessor"
   ],
   "injectors": {
@@ -37,5 +44,7 @@
   "overwrites": {
     "requireAnnotations": true
   },
-  "client": []
+  "client": [
+    "ServerPlayerAvatarMixin"
+  ]
 }

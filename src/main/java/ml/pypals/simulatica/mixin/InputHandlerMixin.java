@@ -5,6 +5,7 @@ import fi.dy.masa.litematica.event.InputHandler;
 import fi.dy.masa.litematica.util.RayTraceUtils;
 import fi.dy.masa.malilib.util.EntityUtils;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.BotInventoryScreen;
 import ml.pypals.simulatica.SimulaticaClient;
 import ml.pypals.simulatica.simulation.SimulationRaycast;
 import ml.pypals.simulatica.simulation.SimulatedUseOnContext;
@@ -12,11 +13,13 @@ import ml.pypals.simulatica.simulation.SimulationManager;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationLevel;
 import ml.pypals.simulatica.simulation.server.SimulationMenus;
+import ml.pypals.simulatica.simulation.server.SimulationViewer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.ItemTags;
@@ -142,6 +145,17 @@ public class InputHandlerMixin {
         if (simulatica$isProjectileItem(held.getItem()) && simulatica$useProjectile(mc, held)) {
             cir.setReturnValue(true);
             return;
+        }
+
+        // 空手右键：准星指向假人（模拟世界中的 ServerPlayer，非 viewer）时直接打开其背包。
+        if (held.isEmpty()) {
+            SimulaticaEntityHit botHit = simulatica$traceSimulationEntity(mc, SimulationRaycast.REACH);
+            if (botHit != null && botHit.entity() instanceof ServerPlayer bot
+                    && !SimulationViewer.isViewer(bot)) {
+                Minecraft.getInstance().gui.setScreen(new BotInventoryScreen(bot));
+                cir.setReturnValue(true);
+                return;
+            }
         }
 
         BlockHitResult hitResult = simulatica$traceSchematicHit(mc);
