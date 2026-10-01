@@ -88,11 +88,23 @@ public final class SimulationSelfTest {
         if (projection == null) return "FAIL piston rendering: no schematic world";
         Minecraft mc = Minecraft.getInstance();
         int[] geometry = {0};
+        int[] order = {0};
         SubmitNodeCollector collector = (SubmitNodeCollector) Proxy.newProxyInstance(
                 SubmitNodeCollector.class.getClassLoader(), new Class<?>[]{SubmitNodeCollector.class},
                 (proxy, method, args) -> {
+                    if (method.getName().equals("order")) {
+                        order[0] = (int) args[0];
+                        return proxy;
+                    }
                     if (method.getName().equals("submitCustomGeometry")) {
                         RenderType type = (RenderType) args[1];
+                        int expected = type == net.minecraft.client.renderer.rendertype.RenderTypes.translucentMovingBlock()
+                                ? 0 : type.primitiveTopology() == com.mojang.blaze3d.PrimitiveTopology.QUADS ? 1 : 2;
+                        if (order[0] != expected) throw new AssertionError("piston overlay rendered before its model");
+                        order[0] = 0;
+                        if (type.outputTarget() != net.minecraft.client.renderer.rendertype.RenderTypes.translucentMovingBlock().outputTarget()) {
+                            throw new AssertionError("piston model and overlay must composite together");
+                        }
                         try (ByteBufferBuilder memory = new ByteBufferBuilder(4096)) {
                             BufferBuilder buffer = new BufferBuilder(memory, type.primitiveTopology(), type.format());
                             ((SubmitNodeCollector.CustomGeometryRenderer) args[2]).render(

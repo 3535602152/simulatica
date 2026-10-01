@@ -35,6 +35,8 @@ public class PistonAnimationSmokeTest implements ClientModInitializer {
                     projection.getChunkSource().loadChunk(0,0);
                     projection.setBlock(pos, Blocks.STICKY_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, Direction.EAST), 2);
                     projection.setBlock(pos.east(), Blocks.STONE.defaultBlockState(), 2);
+                    // Stationary reference for comparing the moving model's projection style.
+                    projection.setBlock(pos.north(2), Blocks.STONE.defaultBlockState(), 2);
                     var area = new AreaSelection();
                     area.setName("piston-scene");
                     area.createNewSubRegionBox(pos.offset(-2,-1,-2), "test");
@@ -58,6 +60,8 @@ public class PistonAnimationSmokeTest implements ClientModInitializer {
                 }
                 if (stage == 150) {
                     String result = (movingHeads > 0 && movingBlocks > 0 ? "PASS" : "FAIL") + " piston scene: submissions="+submissions+", moving heads="+movingHeads+", pushed blocks="+movingBlocks;
+                    if (!result.startsWith("PASS")) throw new AssertionError(result);
+                    result += " | " + SimulationSelfTest.pistonRendering();
                     System.out.println("SIMULATICA_PISTON_SCENE "+result);
                     Files.writeString(Path.of("piston-scene-result.txt"),result);
                     mc.stop();

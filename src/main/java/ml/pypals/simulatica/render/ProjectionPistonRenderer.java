@@ -9,6 +9,7 @@ import fi.dy.masa.malilib.util.data.Color4f;
 import ml.pypals.simulatica.mixin.ChunkRendererSchematicAccessor;
 import ml.pypals.simulatica.mixin.RenderTypeInvoker;
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.block.BlockQuadOutput;
 import net.minecraft.client.renderer.block.ModelBlockRenderer;
@@ -17,6 +18,7 @@ import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
 import net.minecraft.client.renderer.rendertype.RenderSetup;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.rendertype.OutputTarget;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -36,7 +38,9 @@ public final class ProjectionPistonRenderer {
     private ProjectionPistonRenderer() {}
 
     private static RenderType overlayType(OverlayRenderType type, boolean through) {
-        var setup = RenderSetup.builder(through ? type.renderThrough() : type.pipeline());
+        // Composite the overlay together with vanilla's translucent moving model.
+        var setup = RenderSetup.builder(through ? type.renderThrough() : type.pipeline())
+                .setOutputTarget(OutputTarget.ITEM_ENTITY_TARGET);
         if (type == OverlayRenderType.QUAD) setup.sortOnUpload();
         return RenderTypeInvoker.simulatica$create("simulatica_piston_" + type + "_" + through,
                 setup.createRenderSetup());
@@ -63,11 +67,19 @@ public final class ProjectionPistonRenderer {
             collector.submitCustomGeometry(pose, RenderTypes.translucentMovingBlock(), (transform, buffer) ->
                     tessellate(moving, moving.blockState, (x, y, z, quad, colors) -> {
                         int[] original = {colors.getColor(0), colors.getColor(1), colors.getColor(2), colors.getColor(3)};
+                        int[] lights = {colors.getLightCoords(0), colors.getLightCoords(1), colors.getLightCoords(2), colors.getLightCoords(3)};
                         try {
                             colors.multiplyColor(alpha << 24 | 0xFFFFFF);
+                            if (Configs.Visuals.ENABLE_SCHEMATIC_FAKE_LIGHTING.getBooleanValue()) {
+                                int level = Configs.Visuals.RENDER_FAKE_LIGHTING_LEVEL.getIntegerValue();
+                                for (int i = 0; i < 4; i++) colors.setLightCoords(i, LightCoordsUtil.pack(level, level));
+                            }
                             buffer.putBakedQuad(transform, quad, colors);
                         } finally {
-                            for (int i = 0; i < 4; i++) colors.setColor(i, original[i]);
+                            for (int i = 0; i < 4; i++) {
+                                colors.setColor(i, original[i]);
+                                colors.setLightCoords(i, lights[i]);
+                            }
                         }
                     }));
         }
@@ -78,7 +90,8 @@ public final class ProjectionPistonRenderer {
         if (Configs.Visuals.SCHEMATIC_OVERLAY_ENABLE_SIDES.getBooleanValue()) {
             BlockState shape = Configs.Visuals.SCHEMATIC_OVERLAY_MODEL_SIDES.getBooleanValue()
                     ? moving.blockState : Blocks.STONE.defaultBlockState();
-            collector.submitCustomGeometry(pose, through ? SIDES_THROUGH : SIDES, (transform, buffer) ->
+            // Custom geometry batches do not preserve insertion order across render types.
+            collector.order(1).submitCustomGeometry(pose, through ? SIDES_THROUGH : SIDES, (transform, buffer) ->
                     tessellate(moving, shape, (x, y, z, quad, colors) -> {
                         for (int i = 0; i < 4; i++) {
                             buffer.addVertex(transform, quad.position(i))
@@ -91,7 +104,7 @@ public final class ProjectionPistonRenderer {
                     ? moving.blockState : Blocks.STONE.defaultBlockState();
             float width = (float) (through ? Configs.Visuals.SCHEMATIC_OVERLAY_OUTLINE_WIDTH_THROUGH
                     : Configs.Visuals.SCHEMATIC_OVERLAY_OUTLINE_WIDTH).getDoubleValue();
-            collector.submitCustomGeometry(pose, through ? OUTLINES_THROUGH : OUTLINES, (transform, buffer) ->
+            collector.order(2).submitCustomGeometry(pose, through ? OUTLINES_THROUGH : OUTLINES, (transform, buffer) ->
                     tessellate(moving, shape, (x, y, z, quad, colors) -> {
                         for (int i = 0; i < 4; i++) {
                             buffer.addVertex(transform, quad.position(i))
