@@ -312,4 +312,14 @@ public class SimulaticaClient implements ClientModInitializer {
             Simulatica.LOGGER.info(message);
         }
     }
+
+    /** 带样式（颜色）的反馈，原样发送 Component，保留颜色渲染。 */
+    static void sendFeedback(Component message) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player != null) {
+            mc.player.sendSystemMessage(message);
+        } else {
+            Simulatica.LOGGER.info(message.getString());
+        }
+    }
 }

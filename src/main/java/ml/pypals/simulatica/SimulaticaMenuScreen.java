@@ -135,7 +135,7 @@ public final class SimulaticaMenuScreen extends Screen {
         this.leftHeaders.add(new Header("漏斗计数器", this.leftNextY));
         addLeftButton("查看计数", this.leftNextY, LEFT_WIDTH, b -> {
             for (Component line : HopperCounter.formatAll()) {
-                SimulaticaClient.sendFeedback(line.getString());
+                SimulaticaClient.sendFeedback(line);
             }
         });
         this.leftNextY += ROW_HEIGHT;
